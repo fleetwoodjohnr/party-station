@@ -9,6 +9,7 @@
     "simulate": "node scripts/simulate.js",
     "e2e": "node scripts/e2e.js",
     "e2e:cabinet": "bash scripts/e2e-cabinet.sh",
+    "test:wifi": "bash scripts/test-wifi.sh",
     "mdns": "bash scripts/dev-mdns.sh"
   },
   "engines": {

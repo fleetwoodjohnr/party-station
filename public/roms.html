@@ -228,7 +228,7 @@
         lib.systems.some(s => !s.ready && !s.manual) && h('p', { class: 'dim', style: 'font-size:12px;margin-top:6px' },
           'Systems marked "needs setup" are supported, but their emulator isn’t installed yet — ',
           're-run the setup one-liner on the Pi (it skips everything already installed): ',
-          h('b', {}, 'curl -fsSL https://raw.githubusercontent.com/atlas-navigate/party-station/main/scripts/setup-pi.sh | sudo bash')),
+          h('b', {}, 'curl -fsSL https://raw.githubusercontent.com/fleetwoodjohnr/party-station/main/scripts/setup-pi.sh | sudo bash')),
         lib.systems.some(s => !s.ready && s.manual) && h('p', { class: 'dim', style: 'font-size:12px;margin-top:6px' },
           '🧪 PS2 has no RetroPie package (and a Pi 4 runs most PS2 games well below full speed) — ',
           'the shelf only activates if you install a libretro core yourself ',

@@ -138,10 +138,29 @@
     }
 
     async function join(ssid, password) {
+      const previous = info?.network?.ssid || '';
       busy = ssid;
       render();
       try {
-        const r = await S.connect(ssid, password);
+        let r;
+        try {
+          r = await S.connect(ssid, password);
+        } catch (e) {
+          // A successful switch usually tears down this phone's HTTP socket
+          // before the response can cross the old network. That is a handoff,
+          // not a useful red "failed" toast.
+          if (!e.connectionLost) throw e;
+          nets = null;
+          sheet('📶 Switching to ' + ssid,
+            h('div', { class: 'stack' },
+              h('p', {}, 'The station left the old network while this page was waiting.'),
+              h('p', { class: 'dim' }, 'Connect this phone to ', h('b', {}, ssid),
+                ', then open ', h('b', {}, info?.host || 'party-station.local'), '.'),
+              previous && h('p', { class: 'dim', style: 'font-size:13px' },
+                'If the new password was rejected, the station returns to ',
+                h('b', {}, previous), ' automatically.')));
+          return;
+        }
         toast(`Joined ${ssid}`);
         nets = null;
         await refresh();

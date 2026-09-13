@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHECK_INTERVAL = 15 * 60 * 1000;
+const UPDATE_REPO = 'https://github.com/fleetwoodjohnr/party-station.git';
 
 function git(args) {
   return new Promise((resolve, reject) => {
@@ -59,6 +60,13 @@ let inFlight = null;
 export function check() {
   if (!inFlight) {
     inFlight = (async () => {
+      // Do not trust a checkout's saved remote forever. Older Party Station
+      // installs were cloned from atlas-navigate, and changing only the
+      // installer would leave those boxes fetching the old repository.
+      let origin = '';
+      try { origin = await git(['remote', 'get-url', 'origin']); } catch {}
+      if (origin) await git(['remote', 'set-url', 'origin', UPDATE_REPO]);
+      else await git(['remote', 'add', 'origin', UPDATE_REPO]);
       await git(['fetch', 'origin', 'main']);
       const local = await git(['rev-parse', 'HEAD']);
       const remote = await git(['rev-parse', 'origin/main']);
@@ -76,7 +84,7 @@ export async function apply() {
   status.updating = true;
   try {
     await git(['reset', '--hard', 'origin/main']);
-    await npm(['install', '--omit=dev', '--no-audit', '--no-fund']);
+    await npm(['ci', '--omit=dev', '--no-audit', '--no-fund']);
     console.log('Update applied; restarting…');
     // systemd (Restart=always) brings us back up on the new code.
     setTimeout(() => process.exit(0), 800);

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Party Station — one-shot setup for a Raspberry Pi or any Linux box.
 #
-#   curl -fsSL https://raw.githubusercontent.com/atlas-navigate/party-station/main/scripts/setup-pi.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/fleetwoodjohnr/party-station/main/scripts/setup-pi.sh | sudo bash
 #
 # What it does:
 #   1. Sets the hostname to "party-station" so the app lives at http://party-station.local
-#   2. Ensures avahi (mDNS), git, and Node.js 18+ are installed
+#   2. Ensures networking, mDNS, git, sudo, and Node.js 18+ are installed
 #      (supports apt, dnf, yum, pacman, and zypper based distros)
 #   3. Clones the app to /opt/party-station and installs dependencies — always
 #      the latest GitHub main, the exact version a live station runs (stations
@@ -56,7 +56,7 @@ pkg_install() {
   esac
 }
 
-REPO="https://github.com/atlas-navigate/party-station.git"
+REPO="https://github.com/fleetwoodjohnr/party-station.git"
 APP_DIR="${APP_DIR:-/opt/party-station}"
 HOSTNAME_WANTED="party-station"
 RUN_USER="${RUN_USER:-${SUDO_USER:-pi}}"
@@ -79,14 +79,53 @@ if ! id -u "$RUN_USER" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "==> Installing packages (git, avahi, curl)…"
+IS_PI=0
+grep -qi "raspberry pi" /proc/device-tree/model 2>/dev/null && IS_PI=1
+
+echo "==> Installing system dependencies…"
 pkg_refresh
 case "$PKG" in
-  apt-get) pkg_install git avahi-daemon curl ca-certificates >/dev/null ;;
-  *)       pkg_install git avahi curl ca-certificates >/dev/null ;;
+  apt-get)
+    pkg_install git avahi-daemon libnss-mdns curl ca-certificates sudo \
+      iproute2 procps >/dev/null
+    ;;
+  dnf|yum)
+    pkg_install git avahi curl ca-certificates sudo iproute procps-ng >/dev/null
+    pkg_install nss-mdns >/dev/null 2>&1 || true
+    ;;
+  pacman)
+    pkg_install git avahi nss-mdns curl ca-certificates sudo iproute2 procps-ng >/dev/null
+    ;;
+  zypper)
+    pkg_install git avahi curl ca-certificates sudo iproute2 procps >/dev/null
+    pkg_install nss-mdns >/dev/null 2>&1 || true
+    ;;
 esac
-# Fedora/RHEL resolve .local names through nss-mdns; harmless if unavailable.
-case "$PKG" in dnf|yum) pkg_install nss-mdns >/dev/null 2>&1 || true ;; esac
+
+# The settings UI uses NetworkManager through the root-owned helper. It is the
+# Raspberry Pi OS Bookworm+ default, but install it explicitly so Lite images
+# and stripped-down desktop images do not silently get a read-only Wi-Fi page.
+if [ "$IS_PI" = 1 ]; then
+  case "$PKG" in
+    apt-get) pkg_install network-manager rfkill >/dev/null ;;
+    dnf|yum) pkg_install NetworkManager rfkill >/dev/null ;;
+    pacman)  pkg_install networkmanager rfkill >/dev/null ;;
+    zypper)  pkg_install NetworkManager rfkill >/dev/null ;;
+  esac
+fi
+
+MISSING=""
+for bin in git curl sudo ip pkill; do
+  command -v "$bin" >/dev/null 2>&1 || MISSING="$MISSING $bin"
+done
+if [ "$IS_PI" = 1 ] && ! command -v nmcli >/dev/null 2>&1; then
+  MISSING="$MISSING nmcli"
+fi
+if [ -n "$MISSING" ]; then
+  echo "!! Required commands were not installed:${MISSING}"
+  echo "   Check the package-manager output above, then re-run the installer."
+  exit 1
+fi
 
 echo "==> Setting hostname to ${HOSTNAME_WANTED} (→ http://${HOSTNAME_WANTED}.local)…"
 CURRENT_HOST="$(hostname)"
@@ -104,7 +143,20 @@ if [ "$CURRENT_HOST" != "$HOSTNAME_WANTED" ]; then
     echo -e "127.0.1.1\t${HOSTNAME_WANTED}" >> /etc/hosts
   fi
 fi
-systemctl enable --now avahi-daemon >/dev/null 2>&1 || true
+if ! systemctl enable --now avahi-daemon >/dev/null 2>&1; then
+  echo "!! avahi-daemon could not be started — party-station.local will not resolve."
+  exit 1
+fi
+if [ "$IS_PI" = 1 ]; then
+  if ! systemctl enable --now NetworkManager >/dev/null 2>&1; then
+    echo "!! NetworkManager could not be started — the Wi-Fi settings need nmcli."
+    exit 1
+  fi
+  if ! nmcli -t -f TYPE device status 2>/dev/null | grep -qx wifi; then
+    echo "    ⚠️  NetworkManager is running, but it cannot currently see a Wi-Fi adapter."
+    echo "       Check rfkill/airplane mode and the Pi's wireless hardware."
+  fi
+fi
 
 echo "==> Checking Node.js…"
 NEED_NODE=1
@@ -155,14 +207,27 @@ echo "    Node $(node --version)"
 
 echo "==> Fetching Party Station into ${APP_DIR}…"
 if [ -d "$APP_DIR/.git" ]; then
-  git -C "$APP_DIR" fetch origin main
-  git -C "$APP_DIR" reset --hard origin/main
+  # Previous releases used atlas-navigate as origin. Retarget before fetching,
+  # and run Git as the app owner so modern Git does not reject a rerun as a
+  # dubious-ownership checkout.
+  chown -R "$RUN_USER":"$RUN_USER" "$APP_DIR"
+  if sudo -u "$RUN_USER" env HOME="$HOME_DIR" git -C "$APP_DIR" remote get-url origin >/dev/null 2>&1; then
+    sudo -u "$RUN_USER" env HOME="$HOME_DIR" git -C "$APP_DIR" remote set-url origin "$REPO"
+  else
+    sudo -u "$RUN_USER" env HOME="$HOME_DIR" git -C "$APP_DIR" remote add origin "$REPO"
+  fi
+  sudo -u "$RUN_USER" env HOME="$HOME_DIR" git -C "$APP_DIR" fetch origin main
+  sudo -u "$RUN_USER" env HOME="$HOME_DIR" git -C "$APP_DIR" reset --hard origin/main
+elif [ -e "$APP_DIR" ]; then
+  echo "!! ${APP_DIR} already exists but is not a Git checkout."
+  echo "   Move it aside or choose a different APP_DIR, then re-run."
+  exit 1
 else
   git clone --depth 20 "$REPO" "$APP_DIR"
 fi
 cd "$APP_DIR"
-npm install --omit=dev --no-audit --no-fund >/dev/null
 chown -R "$RUN_USER":"$RUN_USER" "$APP_DIR"
+sudo -u "$RUN_USER" env HOME="$HOME_DIR" npm ci --omit=dev --no-audit --no-fund >/dev/null
 
 # ── Privileged helper: the one root door the game server is allowed through ──
 # Wi-Fi switching and the display cap need root. The server runs unprivileged,
@@ -209,7 +274,8 @@ echo "==> Installing systemd service…"
 sed -e "s|__USER__|${RUN_USER}|" -e "s|__APP_DIR__|${APP_DIR}|" \
   "$APP_DIR/systemd/party-station.service" > /etc/systemd/system/party-station.service
 systemctl daemon-reload
-systemctl enable --now party-station
+systemctl enable party-station >/dev/null
+systemctl restart party-station
 sleep 2
 systemctl --no-pager --lines=0 status party-station || true
 
@@ -258,7 +324,13 @@ if [ "${SETUP_KIOSK:-1}" != "0" ]; then
         pacman)  EMOJI_PKGS="noto-fonts-emoji" ;;
         zypper)  EMOJI_PKGS="noto-coloremoji-fonts" ;;
       esac
-      for p in $EMOJI_PKGS wlrctl xdotool wlr-randr; do
+      case "$PKG" in
+        apt-get) DESKTOP_PKGS="pulseaudio-utils x11-xserver-utils" ;;
+        dnf|yum) DESKTOP_PKGS="pulseaudio-utils xrandr" ;;
+        pacman)  DESKTOP_PKGS="libpulse xorg-xrandr" ;;
+        zypper)  DESKTOP_PKGS="pulseaudio-utils xrandr" ;;
+      esac
+      for p in $EMOJI_PKGS $DESKTOP_PKGS wlrctl xdotool wlr-randr; do
         pkg_install "$p" >/dev/null 2>&1 || true
       done
 
@@ -354,7 +426,7 @@ if [ "${SETUP_RETROPIE:-1}" != "0" ] && grep -qi "raspberry pi" /proc/device-tre
     The party games work regardless. To get the Cabinet, either:
       • flash "Raspberry Pi OS (Legacy, Bookworm)" and re-run this script, or
       • accept the multi-hour source build by re-running with:
-          curl -fsSL https://raw.githubusercontent.com/atlas-navigate/party-station/main/scripts/setup-pi.sh | sudo RETROPIE_FROM_SOURCE=1 bash
+          curl -fsSL https://raw.githubusercontent.com/fleetwoodjohnr/party-station/main/scripts/setup-pi.sh | sudo RETROPIE_FROM_SOURCE=1 bash
 EOF
   else
     echo "==> Setting up RetroArch + emulator cores (the retro Cabinet)…"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Party Station — one-shot installer for a Raspberry Pi or any Linux box:
 #
-#   curl -fsSL https://raw.githubusercontent.com/atlas-navigate/party-station/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/fleetwoodjohnr/party-station/main/install.sh | sudo bash
 #
 # Thin wrapper: the real installer lives at scripts/setup-pi.sh (kept there so
 # existing links keep working). Runs the local copy when executed from a
@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SETUP="scripts/setup-pi.sh"
-SETUP_URL="https://raw.githubusercontent.com/atlas-navigate/party-station/main/$SETUP"
+SETUP_URL="https://raw.githubusercontent.com/fleetwoodjohnr/party-station/main/$SETUP"
 
 SRC="${BASH_SOURCE[0]:-}"
 if [ -n "$SRC" ] && [ -f "$(dirname "$SRC")/$SETUP" ]; then

@@ -35,7 +35,7 @@ for f in /boot/firmware/cmdline.txt /boot/cmdline.txt; do
 done
 
 MODE_1080P="1920x1080@60"
-NM_DIR=/etc/NetworkManager/system-connections
+NM_DIR="${PARTY_STATION_NM_DIR:-/etc/NetworkManager/system-connections}"
 
 # ------------------------------------------------------------------ JSON out
 
@@ -327,7 +327,11 @@ cmd_net_connect() {
   [ ${#ssid} -le 32 ] || die 'That network name is too long'
 
   # Passphrase on stdin, never argv — /proc/<pid>/cmdline is world-readable.
-  IFS= read -r psk || psk=""
+  # Keep bytes collected before EOF as well as newline-terminated input. The
+  # Node caller now sends a newline, but accepting both forms keeps direct and
+  # older callers correct without ever putting the secret in argv.
+  psk=""
+  IFS= read -r psk || true
 
   iface="$(wifi_iface)"
   [ -n "$iface" ] || die 'No Wi-Fi adapter found on this machine'

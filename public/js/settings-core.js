@@ -36,7 +36,9 @@ export async function api(path, { method = 'GET', body } = {}) {
   } catch {
     // A dropped connection is the expected outcome of switching Wi-Fi, so the
     // message has to make sense in that case too.
-    throw new Error('Lost contact with the station.');
+    const err = new Error('Lost contact with the station.');
+    err.connectionLost = true;
+    throw err;
   }
   try { data = await res.json(); } catch { data = null; }
   if (!res.ok) {

@@ -64,13 +64,18 @@ if you want the retro Cabinet, see the note below), get it on your network,
 then:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/atlas-navigate/party-station/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/fleetwoodjohnr/party-station/main/install.sh | sudo bash
 ```
 
 That one command sets up the whole console, no menus to click through:
 
 - hostname `party-station` (mDNS via avahi → `party-station.local`),
-  Node.js, the app under `/opt/party-station`, a systemd service on port 80;
+  Node.js, locked npm dependencies, the app under `/opt/party-station`, and a
+  systemd service on port 80;
+- the Raspberry Pi system tools the console relies on: NetworkManager/`nmcli`
+  for Wi-Fi, `iproute2`, `procps`, `sudo`, CA certificates, and Avahi plus the
+  `.local` name-service module. The installer verifies the required commands
+  and services instead of leaving those features silently unavailable;
 - on the desktop image, the **TV kiosk**: auto-login, no screen blanking,
   Chromium fullscreen on the TV view at boot. Plug the HDMI cable into a TV
   and it shows the console; the kiosk waits for the server and relaunches
@@ -81,6 +86,10 @@ That one command sets up the whole console, no menus to click through:
   TurboGrafx-16) via RetroPie's binary packages, so retro ROMs play out of
   the box. ROMs are **never** included — add dumps of games you own
   afterwards (next section).
+
+The built-in Wi-Fi manager targets Raspberry Pi OS **Bookworm or newer**, where
+NetworkManager is the standard network service. Bookworm is the best all-round
+choice because it also has RetroPie's prebuilt emulator packages.
 
 > **Retro Cabinet needs Bookworm:** RetroPie only ships prebuilt emulators
 > for Raspberry Pi OS 12 (Bookworm) and older — in the Raspberry Pi Imager
@@ -94,7 +103,7 @@ Opt out of pieces with env vars — e.g. the Pi is also your desktop machine,
 or you don't want emulators:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/atlas-navigate/party-station/main/install.sh | sudo SETUP_KIOSK=0 SETUP_RETROPIE=0 bash
+curl -fsSL https://raw.githubusercontent.com/fleetwoodjohnr/party-station/main/install.sh | sudo SETUP_KIOSK=0 SETUP_RETROPIE=0 bash
 ```
 
 On Raspberry Pi OS **Lite** there's no browser to run, so the kiosk is
@@ -126,8 +135,20 @@ password. The station drops off the old network while it switches, so the
 phone you did it from will lose the page for a moment — that's expected. If
 the password is wrong or the network doesn't answer, **the station puts
 itself back on the previous network** rather than stranding itself somewhere
-unreachable. Once it's joined, the TV shows the new address to read out to
-guests.
+unreachable. After the handoff, connect the phone to the selected network and
+open `http://party-station.local` again. Once it's joined, the TV shows the
+new address to read out to guests.
+
+If scanning says NetworkManager or the privileged helper is missing, rerun
+the installer above. It is safe to rerun: it refreshes the root-owned helper,
+system packages, service definition, and application without deleting ROMs or
+saved games. For diagnostics from an SSH session or attached keyboard:
+
+```bash
+nmcli device status
+sudo /usr/local/sbin/party-station-ctl net-status
+journalctl -u party-station -n 100 --no-pager
+```
 
 Hotel and café networks with a sign-in page are the one case this can't
 finish: joining works, but the portal still has to be accepted in a browser
@@ -250,10 +271,13 @@ extra cores via `~/RetroPie-Setup/retropie_setup.sh`.
 
 ## Deploying updates
 
-The station updates itself from this repo:
+The station updates itself from
+[`fleetwoodjohnr/party-station`](https://github.com/fleetwoodjohnr/party-station):
 
 - Every 15 minutes it runs `git fetch`; when `origin/main` is ahead **and
-  nobody is mid-game**, it pulls, reinstalls dependencies, and restarts.
+  nobody is mid-game**, it pins `origin` to that repository, pulls, installs
+  the exact production dependency versions from `package-lock.json`, and
+  restarts.
   Idle phones and the TV notice the version change and reload themselves,
   so the new UI actually appears without touching anything.
 - You can also trigger it manually: phone → ⚙️ Settings → **Check for
@@ -264,6 +288,17 @@ The station updates itself from this repo:
 
 So the release process is just: merge/push to `main` on GitHub, and every
 Party Station on the planet (well, in your house) picks it up.
+
+Stations still running a release whose updater only knows the old Atlas
+remote need one bootstrap rerun before they can see Fleetwood updates:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fleetwoodjohnr/party-station/main/install.sh | sudo bash
+```
+
+Automatic updates refresh application code and npm packages. Rerun the same
+idempotent installer when a release changes Raspberry Pi system packages, the
+systemd unit, or the root-owned Wi-Fi/display helper.
 
 ## Adding a game
 

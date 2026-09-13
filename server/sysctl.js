@@ -69,7 +69,10 @@ export function run(args, { stdin } = {}) {
         resolve(parsed);
       });
     if (stdin != null) {
-      child.stdin.end(String(stdin));
+      // scripts/psctl reads one line. Terminate it explicitly: Bash's `read`
+      // returns failure at EOF even after collecting bytes, which caused the
+      // old helper to replace every secured-network password with "".
+      child.stdin.end(String(stdin) + '\n');
     } else {
       child.stdin.end();
     }
