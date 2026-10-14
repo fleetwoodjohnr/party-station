@@ -2,7 +2,7 @@
 // Chrome, starts the bench through /api/bench, screenshots it, and fails on
 // any page error or console error. Talks the DevTools protocol over `ws`
 // (already a dependency) — no puppeteer needed.
-// Usage: CHROME=/path/to/chrome PORT=8090 node scripts/night-smoke.js [secs] [outdir]
+// Usage: CHROME=/path/to/chrome PORT=8090 [SCENE=classic] node scripts/night-smoke.js [secs] [outdir]
 import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -68,7 +68,8 @@ setTimeout(() => { console.error('✗ smoke timed out'); done(1); }, (SECS + 60)
   await cdp('Log.enable');
   await cdp('Page.enable');
   await sleep(2500);
-  const r = await fetch(`${BASE}/api/bench?secs=${SECS}&zombies=40`, { method: 'POST' });
+  const scene = process.env.SCENE ? `&scene=${process.env.SCENE}` : '';
+  const r = await fetch(`${BASE}/api/bench?secs=${SECS}&zombies=40${scene}`, { method: 'POST' });
   const body = await r.json();
   if (!body.ok) { console.error('✗ bench refused:', body.err); return done(1); }
   console.log('✓ bench started');
@@ -78,8 +79,9 @@ setTimeout(() => { console.error('✗ smoke timed out'); done(1); }, (SECS + 60)
     fs.writeFileSync(f, Buffer.from(data, 'base64'));
     console.log('  screenshot', f);
   };
-  await sleep(SECS * 250 + 3000); await shot('night-bench-inside.png');
-  await sleep(SECS * 500); await shot('night-bench-outside.png');
+  const tag = process.env.SCENE || 'flythrough';
+  await sleep(SECS * 250 + 3000); await shot(`night-${tag}-1.png`);
+  await sleep(SECS * 500); await shot(`night-${tag}-2.png`);
   let final = null;
   for (let i = 0; i < 40 && !final; i++) {
     await sleep(500);

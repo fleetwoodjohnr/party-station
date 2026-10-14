@@ -37,6 +37,8 @@ export class Zombies {
     this.frame = 0;
   }
 
+  clear() { this.state.fill(S.FREE); this.alive = 0; }
+
   // Lowest free slot (deterministic, so tests and co-op replay match).
   spawn(type, x, z, hp, speed, rngv = 0.5) {
     for (let i = 0; i < this.n; i++) {

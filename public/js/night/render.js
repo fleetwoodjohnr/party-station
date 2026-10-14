@@ -22,7 +22,7 @@ const LAMP_RGB = [1.25, 0.95, 0.62];
 function bake(world, px, py, pz, nx, ny, nz, ao, interior, out) {
   let r, g, b;
   if (interior) { r = 0.30; g = 0.28; b = 0.30; } else {
-    const m = Math.max(0, nx * MOON.x + ny * MOON.y + nz * MOON.z) * 0.38 + 0.12;
+    const m = Math.max(0, nx * MOON.x + ny * MOON.y + nz * MOON.z) * 0.4 + 0.19;
     r = MOON_RGB[0] * m; g = MOON_RGB[1] * m; b = MOON_RGB[2] * m;
   }
   for (const [lx, lz] of world.lamps) {

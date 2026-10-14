@@ -69,6 +69,13 @@ export class World {
     this.version = 0; // bumps whenever passability changes (flow field cache key)
   }
 
+  // Back to a fresh map: every window boarded, every door shut.
+  reset() {
+    for (const w of this.windows) w.boards = MAX_BOARDS;
+    for (const d of Object.values(this.doors)) d.open = false;
+    this.version++;
+  }
+
   idx(x, y) { return y * this.w + x; }
   cell(x, y) {
     if (x < 0 || y < 0 || x >= this.w || y >= this.h) return C.VOID;

@@ -1,0 +1,346 @@
+// The in-game state: controller -> Input -> sim step -> events -> sound,
+// effects, HUD and camera. Also the pause menu (Start), the objectives
+// overlay (Select), controller-loss handling and the game-over screen.
+import { THREE } from './render.js';
+import { Game } from './sim/game.js';
+import { emptyInput } from './sim/player.js';
+import { botInput } from './sim/bot.js';
+import { WEAPONS } from './sim/weapons.js';
+import { buildViewmodel, poseViewmodel, muzzleFlash, Effects, chalkSign } from './gear.js';
+import { Hud } from './hud.js';
+import { audio } from './audio.js';
+import { h, Menu, hints } from './ui.js';
+import { Stack, settingsScreen, controlsScreen } from './menus.js';
+import { loadProfile, saveProfile } from './main.js';
+
+const BASE_FOV = 62;
+const LOOK_RATE = 2.9; // rad/s at sensitivity 5, full stick
+
+export class PlayState {
+  constructor(app, opts = {}) {
+    this.app = app;
+    this.opts = opts;
+    this.scene = opts.autopilot ? 'bench-classic' : 'classic';
+  }
+
+  enter() {
+    const a = this.app;
+    const seat = a.ctx.seats?.[0];
+    this.game = new Game({
+      world: a.world, zombies: a.pool, mode: 'classic',
+      seats: [{ name: seat && !seat.bot ? seat.name : 'Survivor' }],
+      seed: (Math.random() * 2 ** 31) | 0,
+      modeOpts: { startRound: this.opts.startRound || 1 },
+    });
+    const P = this.P = this.game.players[0];
+    this.home = [P.x, P.z];
+    if (this.opts.autopilot) {
+      P.god = true; P.infiniteAmmo = true;
+      P.give('smg', null); P.give('shotgun', null);
+    }
+    this.fx = new Effects(a.view.scene);
+    this.signs = [];
+    for (const b of a.world.wallbuys) {
+      const m = chalkSign(WEAPONS[b.weapon].model);
+      m.position.set(b.x + 0.5 + b.face[0] * 0.505, 1.55, b.y + 0.5 + b.face[1] * 0.505);
+      m.rotation.y = Math.atan2(b.face[0], b.face[1]);
+      a.view.scene.add(m); this.signs.push(m);
+    }
+    this.doorSigns = [];
+    for (const d of Object.values(a.world.doors)) {
+      const xs = d.cells.map(c => c[0]), zs = d.cells.map(c => c[1]);
+      const x0 = Math.min(...xs), x1 = Math.max(...xs) + 1, z0 = Math.min(...zs), z1 = Math.max(...zs) + 1;
+      const alongZ = (x1 - x0) < (z1 - z0);
+      for (const side of [-1, 1]) {
+        const m = chalkSign('text', `${d.name.toUpperCase()}\n${d.cost}`);
+        m.scale.setScalar(0.9);
+        m.position.set((x0 + x1) / 2 + (alongZ ? side * ((x1 - x0) / 2 + 0.02) : 0), 1.9,
+          (z0 + z1) / 2 + (alongZ ? 0 : side * ((z1 - z0) / 2 + 0.02)));
+        m.rotation.y = alongZ ? side * Math.PI / 2 : (side > 0 ? 0 : Math.PI);
+        a.view.scene.add(m); this.doorSigns.push({ m, id: d.id });
+      }
+    }
+    this.vmFor(P.weapon.id);
+    this.hudLayer = h('div', { class: 'nn-layer' });
+    a.root.insertBefore(this.hudLayer, a.uiLayer);
+    this.hud = new Hud(this.hudLayer, a.input);
+    this.menus = new Stack(a.uiLayer, a.input, n => audio.ui(n));
+    a.uiLayer.replaceChildren();
+    audio.volume(a.settings.volume / 10 * 0.9);
+    audio.ambience(true);
+    this.t = 0; this.groanT = 1; this.lastStep = 0; this.overT = -1; this.lostT = 0;
+    this.camRoll = 0; this.camDrop = 0;
+    this.camPos = new THREE.Vector3();
+    this.mz = new THREE.Vector3();
+    if (this.opts.autopilot) this.hud.showBanner('Benchmark', `Autopilot from round ${this.opts.startRound || 1}`, 4);
+    this.sendScore();
+  }
+
+  vmFor(id) {
+    if (this.vm?.id === id) return;
+    this._vmGroup?.traverse(o => { o.geometry?.dispose(); o.material?.dispose(); });
+    this.vm = buildViewmodel(id);
+    this._vmGroup = new THREE.Group();
+    this._vmGroup.add(this.vm.root, this.vm.knife);
+    this.app.view.setViewmodel(this._vmGroup);
+  }
+
+  sendScore() {
+    const P = this.P;
+    this.app.ctx.sendScore?.({ text: `🧟 Round ${this.game.mode.round || 1} · ${P.points} pts · ${P.kills} kills` });
+  }
+
+  // Controller -> sim Input, sensitivity and curve already applied.
+  readInput(dt) {
+    const I = this.app.input, s = this.app.settings, P = this.P;
+    const inp = emptyInput();
+    const ads = 1 - P.ads * (1 - s.adsSens);
+    const rate = LOOK_RATE * (s.sens / 5) * ads * dt;
+    inp.lookX = I.look[0] * rate;
+    inp.lookY = I.look[1] * rate * 0.75;
+    inp.mx = I.move[0]; inp.my = I.move[1];
+    inp.fire = I.down('fire'); inp.firePressed = I.pressed('fire');
+    inp.ads = I.down('ads');
+    inp.jump = I.pressed('jump'); inp.crouch = I.pressed('crouch'); inp.sprint = I.pressed('sprint');
+    inp.x = I.down('reload'); inp.xPressed = I.pressed('reload');
+    inp.swap = I.pressed('swap'); inp.melee = I.pressed('melee');
+    inp.assist = s.aimAssist;
+    return inp;
+  }
+
+  update(dt, now) {
+    const a = this.app, I = a.input, g = this.game, P = this.P;
+    this.t += dt;
+    // Lost the controller (battery, out of range): pause until one presses.
+    if (!this.opts.autopilot && !I.connected) {
+      this.lostT += dt;
+      if (this.lostT > 0.5 && !this.menus.open) this.openPause(true);
+    } else this.lostT = 0;
+    if (this.menus.open) {
+      this.menus.handle();
+      if (a.state === this) this.pose(dt, now, 0, 0);
+      return;
+    }
+    if (this.overT >= 0) {
+      this.overT += dt;
+      g.step(Math.min(dt, 1 / 30), []); // the horde keeps feeding behind the death cam
+      this.handle(g.drain());
+      this.pose(dt, now, 0, 0);
+      if (this.overT > 3 && !this.menus.open) this.gameOver();
+      return;
+    }
+    if (I.pressed('pause') && !this.opts.autopilot) { this.openPause(false); return; }
+    g.zcap = a.gov.cap;
+    let inp = this.opts.autopilot ? botInput(g, P, this.home) : this.readInput(dt);
+    const look = [inp.lookX / Math.max(dt, 1e-3), inp.lookY / Math.max(dt, 1e-3)];
+    // Fixed-size substeps keep physics stable on a slow frame; edge-
+    // triggered buttons only count once.
+    let left = Math.min(dt, 0.1);
+    while (left > 1e-4) {
+      const h2 = Math.min(left, 1 / 30);
+      g.step(h2, [inp]);
+      left -= h2;
+      inp = { ...inp, firePressed: false, jump: false, crouch: false, sprint: false, xPressed: false, swap: false, melee: false, lookX: 0, lookY: 0 };
+    }
+    this.handle(g.drain());
+    this.hud.update(dt, P, g, a.view.res.h, a.view.camera.fov * Math.PI / 180);
+    this.hud.objectives(I.down('map') && !this.opts.autopilot, g.mode);
+    this.pose(dt, now, look[0] * 0.015, look[1] * 0.015);
+    // Footsteps.
+    const step = Math.floor(P.stepPhase / Math.PI);
+    if (step !== this.lastStep && P.grounded && P.speedFrac > 0.15) audio.step(P.sprinting);
+    this.lastStep = step;
+    // Ambient groans from zombies that are close.
+    this.groanT -= dt;
+    if (this.groanT <= 0) {
+      this.groanT = 0.8 + Math.random() * 1.4;
+      const Z = g.zombies;
+      const live = [];
+      for (let i = 0; i < Z.n; i++) if (Z.isLive(i)) live.push(i);
+      if (live.length) {
+        const i = live[Math.floor(Math.random() * live.length)];
+        const [pan, vol] = this.where(Z.x[i], Z.z[i]);
+        audio.groan(pan, vol, Z.type[i] === 1 ? 1.25 : 1);
+      }
+    }
+    if (this.opts.benchSecs && this.t >= this.opts.benchSecs && !this.benchDone) this.finishBench();
+  }
+
+  // Pan (-1 left … 1 right) and loudness of a world point, from the player.
+  where(x, z) {
+    const P = this.P;
+    const dx = x - P.x, dz = z - P.z, d = Math.hypot(dx, dz) || 1;
+    const rx = Math.cos(P.yaw), rz = -Math.sin(P.yaw);
+    return [(dx * rx + dz * rz) / d, Math.max(0, 1 - d / 26)];
+  }
+
+  handle(events) {
+    const P = this.P, I = this.app.input, view = this.app.view;
+    for (const e of events) {
+      switch (e.e) {
+        case 'shot': {
+          if (e.p !== P.seat) break;
+          audio.gun(WEAPONS[e.w].sound);
+          muzzleFlash(this.vm);
+          I.rumble(e.w === 'shotgun' ? 0.7 : 0.25, 0.35, e.w === 'shotgun' ? 140 : 60);
+          if (e.end) {
+            this.mz.set(0.13 * (1 - P.ads), -0.09, -0.7).applyMatrix4(view.camera.matrixWorld);
+            this.fx.tracer(this.mz.x, this.mz.y, this.mz.z, e.end[0], e.end[1], e.end[2]);
+          }
+          break;
+        }
+        case 'hit':
+          this.fx.burst(e.x, e.y, e.z2, e.head ? 14 : e.kill ? 10 : 5, this.fx.blood, e.head ? 3 : 2, e.head ? 0.08 : 0.06);
+          if (e.p === P.seat) {
+            this.hud.flashHit(e.kill);
+            if (e.kill) audio.kill(e.head); else audio.hitmark(e.head);
+          }
+          break;
+        case 'impact': this.fx.burst(e.x, e.y, e.z, 4, this.fx.dust, 1.5, 0.04, 1, 0.45); break;
+        case 'board': {
+          const W = this.app.world.windows[e.w];
+          this.fx.burst(W.x + 0.5, 1.5, W.y + 0.5, 6, this.fx.wood, 2.5, 0.08);
+          const [pan, vol] = this.where(W.x + 0.5, W.y + 0.5);
+          audio.board(pan, Math.max(0.15, vol));
+          break;
+        }
+        case 'repair': audio.hammer(); break;
+        case 'windup': {
+          const Z = this.game.zombies;
+          const [pan, vol] = this.where(Z.x[e.z], Z.z[e.z]);
+          audio.swipe(pan, vol);
+          if (Math.random() < 0.5) audio.groan(pan, vol, 1.1);
+          break;
+        }
+        case 'hurt':
+          if (e.p === P.seat) { audio.hurt(); I.rumble(1, 0.8, 260); }
+          break;
+        case 'points': if (e.p === P.seat && !e.silent) this.hud.popPoints(e.n); break;
+        case 'buy': audio.buy(); this.hud.popPoints(e.n); this.sendScore(); break;
+        case 'door':
+          audio.door(); this.hud.popPoints(e.n);
+          for (const s of this.doorSigns) if (s.id === e.id) s.m.visible = false;
+          break;
+        case 'denied': audio.denied(); this.hud.showNote('Not enough points', 1.5); break;
+        case 'weapon': case 'swap': if (e.p === P.seat) { this.vmFor(e.w); audio.swap(); } break;
+        case 'reload': if (e.p === P.seat) audio.reload(); break;
+        case 'reloaded': if (e.p === P.seat) audio.reloaded(); break;
+        case 'shell': if (e.p === P.seat) audio.shell(); break;
+        case 'dry': audio.dry(); break;
+        case 'knife': audio.knife(); break;
+        case 'land': audio.land(); break;
+        case 'roundStart':
+          audio.roundStart();
+          this.hud.showBanner(`Round ${e.round}`, e.round === 1 ? 'They’re coming' : 'Here they come');
+          this.sendScore();
+          break;
+        case 'roundEnd':
+          audio.roundEnd();
+          this.hud.showBanner(`Round ${e.round} survived`, 'Rebuild the windows', 3.5);
+          this.sendScore();
+          break;
+        case 'gameover':
+          audio.gameOver();
+          this.hud.showBanner('You died', `Survived ${Math.max(0, e.round - 1)} rounds`, 6);
+          this.overT = 0;
+          I.rumble(1, 1, 600);
+          this.saveStats(e.round);
+          break;
+      }
+    }
+  }
+
+  pose(dt, now, lookX, lookY) {
+    const P = this.P, view = this.app.view;
+    // Death cam: sink to the floor and roll.
+    if (P.down) { this.camDrop = Math.min(1.25, this.camDrop + dt * 1.6); this.camRoll = Math.min(0.5, this.camRoll + dt * 0.8); }
+    const bob = P.grounded ? -Math.abs(Math.cos(P.stepPhase)) * 0.035 * P.speedFrac * (1 - P.ads * 0.7) : 0;
+    view.setEye(P.x, P.y + P.eye + bob - this.camDrop, P.z, P.yaw, P.pitch + P.kick * 0.01, this.camRoll);
+    const W = WEAPONS[P.weapon.id];
+    const fov = BASE_FOV / (1 + (W.zoom - 1) * P.ads) + (P.sprinting ? 4 : 0);
+    if (Math.abs(view.camera.fov - fov) > 0.05) {
+      view.camera.fov += (fov - view.camera.fov) * Math.min(1, dt * 14);
+      view.camera.updateProjectionMatrix();
+    }
+    view.camera.updateMatrixWorld();
+    poseViewmodel(this.vm, P, dt, now / 1000, lookX, lookY);
+    this.fx.update(dt);
+    for (const s of this.doorSigns) if (this.app.world.doors[s.id].open) s.m.visible = false;
+  }
+
+  openPause(lost) {
+    const a = this.app;
+    this.hud.objectives(false);
+    const items = [
+      { label: 'Resume', act: () => this.menus.clear() },
+      { label: 'Settings', act: () => this.menus.push(settingsScreen(a, this.menus)) },
+      { label: 'Controls', act: () => this.menus.push(controlsScreen(a, this.menus)) },
+      { label: 'Restart', sub: 'Back to round 1', act: () => a.setState(new PlayState(a, {})) },
+      { label: 'Quit to Party Station', act: () => { this.saveStats(this.game.mode.round); a.quit(); } },
+    ];
+    const menu = new Menu(items, { onBack: () => this.menus.clear() });
+    this.menus.push({
+      handle: (input, sfx) => menu.handle(input, sfx),
+      el: () => [
+        h('div', { style: 'position:absolute;left:7vw;top:9vh;font-size:2.4em;font-weight:900;letter-spacing:.1em' }, lost ? 'Controller lost' : 'Paused'),
+        lost ? h('div', { style: 'position:absolute;left:7vw;top:20vh;font-size:1.1em;opacity:.85' },
+          'Reconnect it, or press a button on any controller to take over.') : null,
+        menu.el(),
+        hints(a.input, [[0, 'Select'], [1, 'Resume']]),
+      ],
+    });
+  }
+
+  gameOver() {
+    const a = this.app, P = this.P, g = this.game;
+    const survived = Math.max(0, g.mode.round - 1);
+    const menu = new Menu([
+      { label: 'Play again', act: () => a.setState(new PlayState(a, {})) },
+      { label: 'Quit to Party Station', act: () => a.quit() },
+    ], { onBack: () => a.quit() });
+    this.menus.push({
+      handle: (input, sfx) => menu.handle(input, sfx),
+      el: () => [
+        h('div', { style: 'position:absolute;left:7vw;top:6vh' },
+          h('div', { class: 'nn-title', style: 'font-size:clamp(36px,5vw,96px)' }, 'You died'),
+          h('div', { style: 'font-size:1.3em;margin-top:.6em' }, `You survived ${survived} round${survived === 1 ? '' : 's'}`),
+          h('div', { style: 'opacity:.8;margin-top:.3em' }, `${P.kills} kills · ${P.heads} headshots · ${P.points.toLocaleString()} points`),
+          this.best ? h('div', { style: 'opacity:.8;margin-top:.3em;color:#ffe08a' },
+            survived >= this.best.bestRound ? '★ New best!' : `Best: ${this.best.bestRound} rounds`) : null),
+        menu.el(),
+        hints(a.input, [[0, 'Select']]),
+      ],
+    });
+  }
+
+  async saveStats(round) {
+    if (this.opts.autopilot || this._saved) return;
+    this._saved = true;
+    const survived = Math.max(0, round - 1);
+    const st = (await loadProfile('stats')) || { bestRound: 0, games: 0, kills: 0 };
+    this.best = { ...st };
+    st.bestRound = Math.max(st.bestRound, survived);
+    st.games++; st.kills += this.P.kills;
+    saveProfile('stats', st);
+  }
+
+  finishBench() {
+    this.benchDone = true;
+    this.app.finishBench(this.game.zombies.alive);
+  }
+
+  exit() {
+    const a = this.app;
+    this.menus.closed = true;
+    audio.ambience(false);
+    for (const m of this.signs) { a.view.scene.remove(m); m.geometry.dispose(); m.material.map?.dispose(); m.material.dispose(); }
+    for (const { m } of this.doorSigns) { a.view.scene.remove(m); m.geometry.dispose(); m.material.map?.dispose(); m.material.dispose(); }
+    for (const o of [this.fx.parts, this.fx.tracers]) { a.view.scene.remove(o); o.geometry.dispose(); o.material.dispose(); }
+    a.view.setViewmodel(null);
+    this._vmGroup?.traverse(o => { o.geometry?.dispose(); o.material?.dispose(); });
+    this.hudLayer.remove();
+    a.uiLayer.replaceChildren();
+    a.pool.clear();
+    a.world.reset();
+  }
+}

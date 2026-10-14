@@ -11,9 +11,11 @@ const CSS = `
 .nn-layer{position:absolute;inset:0;pointer-events:none}
 .nn-dim{position:absolute;inset:0;background:radial-gradient(ellipse at center,rgba(5,6,12,.55),rgba(5,6,12,.9))}
 .nn-title{font-weight:900;letter-spacing:.12em;text-transform:uppercase;line-height:.9;
-  font-size:clamp(48px,7.5vw,150px);color:#efe6cf;text-shadow:0 0 30px rgba(180,40,40,.55),0 6px 0 #4a0d12}
+  font-size:clamp(40px,6vw,118px);color:#efe6cf;text-shadow:0 0 30px rgba(180,40,40,.55),0 6px 0 #4a0d12}
 .nn-title small{display:block;font-size:.22em;letter-spacing:.5em;color:#c9b98f;text-shadow:none;margin-top:.7em;font-weight:700}
-.nn-menu{position:absolute;left:7vw;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:.4em;min-width:34vw}
+.nn-menu{position:absolute;left:7vw;top:31vh;display:flex;flex-direction:column;gap:.35em;min-width:34vw;max-width:60vw}
+.nn-menu.compact{top:22vh;gap:.15em}.nn-menu.compact .nn-item{font-size:1.02em;padding:.24em .8em}
+.nn-more{font-size:.8em;opacity:.6;padding-left:1em}
 .nn-item{font-size:1.35em;font-weight:800;padding:.42em .8em;border-left:.22em solid transparent;color:#d8d0bd;
   background:linear-gradient(90deg,rgba(0,0,0,.35),transparent)}
 .nn-item.focus{border-color:#d33c3c;color:#fff;background:linear-gradient(90deg,rgba(160,30,30,.55),transparent)}
@@ -75,13 +77,26 @@ export class Menu {
     if (input.hit(1) && this.onBack) { sfx?.('back'); this.onBack(); return true; }
     return false;
   }
+  // Long lists get the compact style and a window of 9 rows that follows
+  // the focus, so nothing ever runs off a 720p screen.
   el() {
-    return h('div', { class: 'nn-menu' }, this.items.map((it, i) => h('div', {
-      class: 'nn-item' + (i === this.idx ? ' focus' : '') + (it.disabled ? ' dis' : ''),
-    },
-      typeof it.val === 'function' ? h('span', { class: 'val' }, it.val()) : null,
-      typeof it.label === 'function' ? it.label() : it.label,
-      it.sub ? h('span', { class: 'sub' }, it.sub) : null)));
+    const n = this.items.length, VIS = 9;
+    const compact = n > 6;
+    let lo = 0, hi = n;
+    if (n > VIS) {
+      lo = Math.max(0, Math.min(n - VIS, this.idx - (VIS >> 1)));
+      hi = lo + VIS;
+    }
+    return h('div', { class: 'nn-menu' + (compact ? ' compact' : '') },
+      lo > 0 ? h('div', { class: 'nn-more' }, '▲') : null,
+      this.items.slice(lo, hi).map((it, k) => {
+        const i = lo + k;
+        return h('div', { class: 'nn-item' + (i === this.idx ? ' focus' : '') + (it.disabled ? ' dis' : '') },
+          typeof it.val === 'function' ? h('span', { class: 'val' }, it.val()) : null,
+          typeof it.label === 'function' ? it.label() : it.label,
+          it.sub ? h('span', { class: 'sub' }, it.sub) : null);
+      }),
+      hi < n ? h('div', { class: 'nn-more' }, '▼') : null);
   }
 }
 

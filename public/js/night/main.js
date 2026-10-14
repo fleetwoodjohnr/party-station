@@ -8,7 +8,9 @@ import { DINER } from './sim/maps.js';
 import { Zombies } from './sim/zombies.js';
 import { PadInput, DEFAULT_SETTINGS } from './input.js';
 import { injectStyles, h, mount, Menu, hints } from './ui.js';
-import { sfx } from '../sfx.js';
+import { audio } from './audio.js';
+import { Stack, settingsScreen, controlsScreen } from './menus.js';
+import { PlayState } from './play.js';
 
 const GAME = 'deadofnight';
 // Internal render sizes (16:9), smallest first; CSS stretches to the screen.
@@ -130,7 +132,10 @@ class App {
       return;
     }
     this.applyResolution();
-    if (this.opts.bench) this.setState(new BenchState(this));
+    if (this.opts.bench && this.opts.scene === 'classic') {
+      this.perfEl.style.display = '';
+      this.setState(new PlayState(this, { autopilot: true, startRound: 10, benchSecs: Number(this.opts.secs) || 60 }));
+    } else if (this.opts.bench) this.setState(new BenchState(this));
     else {
       this.setState(new TitleState(this));
       loadProfile('settings').then(s => { if (s) this.applySettings(s); });
@@ -143,6 +148,7 @@ class App {
     if (!this.opts.bench) this.gov.set(this.settings.quality);
     this.applyResolution();
     this.perfEl.style.display = this.settings.showFps || this.opts.bench ? '' : 'none';
+    audio.volume(this.settings.volume / 10 * 0.9);
   }
   saveSettings() { saveProfile('settings', this.settings); }
 
@@ -157,7 +163,22 @@ class App {
     st.enter?.();
   }
 
-  sfx(name) { sfx[name]?.(); }
+  sfx(name) { audio.ui(name); }
+
+  // End of a bench run (flythrough or autopilot): whole-run summary beacon
+  // (first 2 s skipped — shader compiles, first uploads), then hand back.
+  finishBench(live) {
+    let skip = 0, acc = 0;
+    while (skip < this.stats.run.length && acc < 2000) acc += this.stats.run[skip++];
+    const all = FrameStats.pct(this.stats.run.slice(skip));
+    this.beacon(true, live, 'bench-total', all).finally(() => {
+      if (this.opts.bench) this.ctx.end?.({ title: 'Benchmark finished', lines: [`${all.fps?.toFixed(1)} fps average`] });
+      else this.setState(new TitleState(this));
+    });
+    mount(this.uiLayer, h('div', { class: 'nn-center' }, h('div', { class: 'nn-panel' },
+      h('div', { style: 'font-size:1.6em;font-weight:900' }, 'Benchmark finished'),
+      h('p', {}, `${all.fps?.toFixed(1)} fps · p95 ${all.p95?.toFixed(1)} ms · worst ${all.worst?.toFixed(0)} ms`))));
+  }
 
   tick(now) {
     if (this.stopped) return;
@@ -229,18 +250,24 @@ class TitleState {
       const [x, z] = a.world.spawns[k % a.world.spawns.length];
       a.pool.spawn(0, x + 0.5, z + 0.5, 100, 0.9 + k * 0.05, k / 6);
     }
+    this.stack = new Stack(a.uiLayer, a.input, n => a.sfx(n));
+    const ret = this.stack.pop.bind(this.stack);
+    this.stack.pop = () => { ret(); if (!this.stack.open) this.draw(); };
     this.menu = new Menu([
-      { label: 'Classic Survival', sub: 'Wave survival at the Route 9 Diner — arriving in the next update', disabled: true },
-      { label: 'Run benchmark', sub: 'One minute flythrough with 40 zombies — measures this TV', act: () => a.setState(new BenchState(a)) },
+      { label: 'Classic Survival', sub: 'Hold the Route 9 Diner through endless waves', act: () => a.setState(new PlayState(a, {})) },
+      { label: 'Settings', act: () => this.stack.push(settingsScreen(a, this.stack)) },
+      { label: 'Controls', act: () => this.stack.push(controlsScreen(a, this.stack)) },
+      { label: 'Run benchmark', sub: 'One-minute flythrough with 40 zombies — measures this TV', act: () => a.setState(new BenchState(a)) },
       { label: 'Quit to Party Station', act: () => a.quit() },
     ], { onBack: () => a.quit() });
     this.draw();
   }
   draw() {
     const a = this.app;
+    if (this.stack.open) return;
     mount(a.uiLayer,
       h('div', { class: 'nn-dim', style: 'background:linear-gradient(90deg,rgba(5,6,12,.88),rgba(5,6,12,.2) 60%,transparent)' }),
-      h('div', { style: 'position:absolute;left:7vw;top:12vh' },
+      h('div', { style: 'position:absolute;left:7vw;top:8vh' },
         h('div', { class: 'nn-title' }, 'Dead of Night', h('small', {}, 'Route 9 Diner'))),
       this.menu.el(),
       hints(a.input, [[0, 'Select'], [1, 'Quit']]));
@@ -248,17 +275,22 @@ class TitleState {
   update(dt, now) {
     const a = this.app;
     this.t += dt;
-    if (this.menu.handle(a.input, n => a.sfx(n))) this.draw();
+    if (this.stack.open) this.stack.handle();
+    else if (this.menu.handle(a.input, n => a.sfx(n)) && a.state === this) this.draw();
+    if (a.state !== this) return;
     // Decoy wanders the parking lot so the zombies have somewhere to go.
     this.decoy.x = 23 + Math.sin(this.t * 0.11) * 12;
     this.decoy.z = 27 + Math.cos(this.t * 0.17) * 2;
-    const flow = a.world.flow([[Math.floor(this.decoy.x), Math.floor(this.decoy.z)]]);
-    a.pool.step(dt, a.world, flow, [this.decoy], [], Math.random);
+    if (!this.flow || this.t - this.flowAt > 0.5) {
+      this.flowAt = this.t;
+      this.flow = a.world.flow([[Math.floor(this.decoy.x), Math.floor(this.decoy.z)]]);
+    }
+    a.pool.step(dt, a.world, this.flow, [this.decoy], [], Math.random);
     const ang = this.t * 0.05 + 2.2;
     const cx = 24 + Math.cos(ang) * 20, cz = 17 + Math.sin(ang) * 16;
     a.view.setEye(cx, 4.2, cz, Math.atan2(cx - 24, cz - 17), -0.12);
   }
-  exit() { this.app.pool.state.fill(0); this.app.pool.alive = 0; }
+  exit() { this.stack.closed = true; this.app.pool.clear(); }
 }
 
 // ---------------------------------------------------------------- bench
@@ -314,19 +346,8 @@ class BenchState {
     if (this.t >= this.secs && !this.done) this.finish();
   }
   finish() {
-    const a = this.app;
     this.done = true;
-    // Skip the first 2 s (shader compile, first uploads) in the summary.
-    let skip = 0, acc = 0;
-    while (skip < a.stats.run.length && acc < 2000) acc += a.stats.run[skip++];
-    const all = FrameStats.pct(a.stats.run.slice(skip));
-    a.beacon(true, a.pool.alive, 'bench-total', all).finally(() => {
-      if (a.opts.bench) a.ctx.end?.({ title: 'Benchmark finished', lines: [`${all.fps?.toFixed(1)} fps average`] });
-      else a.setState(new TitleState(a));
-    });
-    mount(a.uiLayer, h('div', { class: 'nn-center' }, h('div', { class: 'nn-panel' },
-      h('div', { style: 'font-size:1.6em;font-weight:900' }, 'Benchmark finished'),
-      h('p', {}, `${all.fps?.toFixed(1)} fps · p95 ${all.p95?.toFixed(1)} ms · worst ${all.worst?.toFixed(0)} ms`))));
+    this.app.finishBench(this.app.pool.alive);
   }
   exit() {
     const a = this.app;
@@ -341,6 +362,7 @@ export function start(holder, ctx) {
   const root = h('div', { class: 'nn-root' });
   holder.appendChild(root);
   const app = new App(root, ctx);
+  if (/[?&]dev\b/.test(location.search)) window.__night = app; // test harness handle
   return {
     stop: () => app.stop(),
     rehome: h2 => { if (root.parentNode !== h2) h2.appendChild(root); },

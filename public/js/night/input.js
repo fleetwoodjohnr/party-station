@@ -21,7 +21,7 @@ export const DEFAULT_BINDS = {
 
 export const DEFAULT_SETTINGS = {
   sens: 5, adsSens: 0.6, invertY: false, deadzone: 0.12, curve: 1.8,
-  aimAssist: 'standard', vibration: true, quality: 'auto', showFps: false,
+  aimAssist: 'standard', vibration: true, volume: 8, quality: 'auto', showFps: false,
   binds: { ...DEFAULT_BINDS },
 };
 
@@ -64,9 +64,10 @@ export class PadInput {
     this.connected = false;
     this.lastSeen = 0;
     this.keys = new Set();
+    this.taps = new Set(); // keys pressed since the last poll, so a quick tap between frames still counts
     this._kb = e => {
       if (e.ctrlKey || e.altKey || e.metaKey) return;
-      if (e.type === 'keydown') this.keys.add(e.code); else this.keys.delete(e.code);
+      if (e.type === 'keydown') { this.keys.add(e.code); this.taps.add(e.code); } else this.keys.delete(e.code);
     };
     addEventListener('keydown', this._kb);
     addEventListener('keyup', this._kb);
@@ -93,7 +94,8 @@ export class PadInput {
       [lx, ly] = stick(gp.axes[2] || 0, gp.axes[3] || 0, st.deadzone, st.curve);
     }
     // Dev keyboard: WASD move, arrows look, Space jump, mouse-less fire on J.
-    const K = this.keys;
+    const K = new Set([...this.keys, ...this.taps]);
+    this.taps.clear();
     if (K.size) {
       if (K.has('KeyW')) my = -1; if (K.has('KeyS')) my = 1;
       if (K.has('KeyA')) mx = -1; if (K.has('KeyD')) mx = 1;
@@ -101,7 +103,8 @@ export class PadInput {
       if (K.has('ArrowUp')) ly = -0.5; if (K.has('ArrowDown')) ly = 0.5;
       const map = { KeyJ: BTN.RT, KeyK: BTN.LT, Space: BTN.A, KeyC: BTN.B, KeyR: BTN.X, KeyQ: BTN.Y, ShiftLeft: BTN.L3,
         KeyV: BTN.R3, KeyG: BTN.RB, KeyF: BTN.LB, Escape: BTN.START, Tab: BTN.SELECT, Enter: BTN.A, Backspace: BTN.B,
-        Digit1: BTN.UP, Digit2: BTN.DOWN, Digit3: BTN.LEFT, Digit4: BTN.RIGHT };
+        Digit1: BTN.UP, Digit2: BTN.DOWN, Digit3: BTN.LEFT, Digit4: BTN.RIGHT,
+        ArrowUp: BTN.UP, ArrowDown: BTN.DOWN, ArrowLeft: BTN.LEFT, ArrowRight: BTN.RIGHT };
       for (const [code, b] of Object.entries(map)) if (K.has(code)) this.cur[b] = 1;
       this.connected = true;
     }
