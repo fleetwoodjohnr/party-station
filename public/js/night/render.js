@@ -53,7 +53,7 @@ class Horde {
     this.arm = mk(partGeo(0.12, 0.64, 0.12, true), n * 2);
     this.leg = mk(partGeo(0.16, 0.8, 0.17, true), n * 2);
     // Unit box for everything type-specific: helmets, vests, sacs, horns.
-    this.extra = mk(partGeo(1, 1, 1, false), n * 3);
+    this.extra = mk(partGeo(1, 1, 1, false), n * 5);
     this.m = new THREE.Matrix4(); this.root = new THREE.Matrix4(); this.loc = new THREE.Matrix4();
     this.q = new THREE.Quaternion(); this.e = new THREE.Euler(); this.v = new THREE.Vector3(); this.sc = new THREE.Vector3();
     this.col = new THREE.Color();
@@ -69,6 +69,7 @@ class Horde {
     for (const k of Object.keys(this.look)) this.look[k] = this.look[k].map(c => (c == null ? null : lin(c)));
     this.helmetC = lin(0x3f4636); this.plateC = lin(0x2f342c); this.sacC = lin(0x9be05a); this.hornC = lin(0xd8cfb8);
     this.fuseC = lin(0xffe04a);
+    this.eyeC = lin(0xd8e070).multiplyScalar(2.2); // a faint glow — they read in the dark
   }
 
   _put(mesh, idx, x, y, z, rx, ry, rz, s = 1, sy = s, sz = s) {
@@ -111,13 +112,15 @@ class Horde {
       const hot = 1 + fl * 0.8 + (P.burnT[i] > 0 ? 0.6 + Math.sin(now * 30 + i) * 0.3 : 0);
       const headGone = st === S.DYING && P.headKill[i];
       if (T.crawl) {
-        // Belly on the floor, dragging itself on its arms.
-        this._put(this.torso, k, 0, 0.22, 0.05, 1.45, 0, sway * 0.5);
-        this._put(this.head, k, 0, 0.32, -0.55, 0.3 + sway, sway * 2, 0, headGone ? 0.001 : 1);
-        this._put(this.leg, k * 2, -0.11, 0.2, 0.6, 1.6 + swing * 0.2, 0, 0.1);
-        this._put(this.leg, k * 2 + 1, 0.11, 0.2, 0.6, 1.6 - swing * 0.2, 0, -0.1);
-        this._put(this.arm, k * 2, -0.25, 0.3, -0.45, -1.4 + Math.sin(walk) * 0.6, 0, 0.2);
-        this._put(this.arm, k * 2 + 1, 0.25, 0.3, -0.45, -1.4 - Math.sin(walk) * 0.6, 0, -0.2);
+        // Belly on the floor, head first, hauling itself on its arms with the
+        // legs dragging behind (local +z is the way it's facing).
+        this._put(this.torso, k, 0, 0.22, -0.3, 1.45, 0, sway * 0.5);
+        this._put(this.head, k, 0, 0.26, 0.36, -0.4 + sway, sway * 2, 0, headGone ? 0.001 : 1);
+        this._put(this.leg, k * 2, -0.11, 0.2, -0.3, 1.5 + swing * 0.2, 0, 0.1);
+        this._put(this.leg, k * 2 + 1, 0.11, 0.2, -0.3, 1.5 - swing * 0.2, 0, -0.1);
+        this._put(this.arm, k * 2, -0.25, 0.3, 0.25, -1.5 + Math.sin(walk) * 0.6, 0, 0.2);
+        this._put(this.arm, k * 2 + 1, 0.25, 0.3, 0.25, -1.5 - Math.sin(walk) * 0.6, 0, -0.2);
+        if (!headGone) { ex(-0.07, 0.5, 0.66, 0, 0, 0, 0.05, 0.03, 0.02, this.eyeC); ex(0.07, 0.5, 0.66, 0, 0, 0, 0.05, 0.03, 0.02, this.eyeC); }
       } else {
         const lean = T.id === 'brute' || T.id === 'warden' ? 0.3 : 0.18;
         this._put(this.leg, k * 2, -0.11, 0.8 + bob, 0, swing, 0, 0);
@@ -135,7 +138,11 @@ class Horde {
         this._put(this.arm, k * 2 + 1, 0.3 * bloat, 1.38 + bob, 0.04, armX - swing * 0.3, 0, -0.1);
         const headTilt = st === S.SCREAM || st === S.SPIT ? -0.5 : 0.15 + sway;
         this._put(this.head, k, 0, 1.42 + bob, 0.02, headTilt, sway * 2, sway, headGone ? 0.001 : 1);
-        // Type extras, in the same root space.
+        // Eyes, then type extras, in the same root space.
+        if (!headGone && st !== S.DYING) {
+          ex(-0.07, 1.62 + bob, 0.18, 0, 0, 0, 0.05, 0.03, 0.02, this.eyeC);
+          ex(0.07, 1.62 + bob, 0.18, 0, 0, 0, 0.05, 0.03, 0.02, this.eyeC);
+        }
         if (P.helmet[i] > 0) ex(0, 1.72 + bob, 0.02, 0.15, 0, 0, 0.34, 0.12, 0.34, this.helmetC);
         if (P.vest[i] > 0) ex(0, 0.95 + bob, 0.0, lean, 0, 0, 0.52, 0.42, 0.33, this.plateC);
         if (T.id === 'spitter') ex(0, 1.15 + bob, 0.2, lean, 0, 0, 0.3, 0.32, 0.18, this.sacC);

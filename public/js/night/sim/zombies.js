@@ -103,7 +103,7 @@ export class Zombies {
       const hy = zy + T.headY * sz;
       const hr = T.headR * sz * 1.15; // a little forgiving on a TV
       let lx = ox - zx, ly = oy - hy, lz = oz - zz;
-      if (T.crawl) { lx -= -Math.sin(this.yaw[i]) * 0.55; lz -= -Math.cos(this.yaw[i]) * 0.55; }
+      if (T.crawl) { lx -= Math.sin(this.yaw[i]) * 0.5; lz -= Math.cos(this.yaw[i]) * 0.5; } // its head leads, low and forward
       const b = lx * dx + ly * dy + lz * dz;
       const c = lx * lx + ly * ly + lz * lz - hr * hr;
       const disc = b * b - c;

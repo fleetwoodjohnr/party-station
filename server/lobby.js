@@ -7,6 +7,7 @@
 // with human-feeling delays. Real-time arcade games ("relay" mode) run their
 // simulation in the TV browser; this server just relays phone inputs to it.
 import crypto from 'crypto';
+import { execFile } from 'child_process';
 import { byId, catalog } from './registry.js';
 import * as saves from './saves.js';
 import * as updater from './updater.js';
@@ -597,6 +598,19 @@ function onTvMsg(ws, m) {
 
 // ---------------------------------------------------------------- wiring
 
+// A crashed TV tab ("Aw, Snap") never reconnects, and the kiosk only
+// relaunches Chromium when the whole browser exits — so if no TV comes back
+// within 15 s, restart the kiosk browser (no-op where there's no kiosk).
+let tvGoneTimer = null;
+function watchForDeadTv() {
+  clearTimeout(tvGoneTimer);
+  tvGoneTimer = setTimeout(() => {
+    if (tvSockets.size || emulator.publicState()) return;
+    console.log('tv: no screen for 15 s — restarting the kiosk browser');
+    execFile('pkill', ['-f', 'user-data-dir=.*party-station-kiosk'], () => {});
+  }, 15000);
+}
+
 export function handleConnection(ws) {
   let role = null;
   ws.on('message', raw => {
@@ -607,6 +621,7 @@ export function handleConnection(ws) {
       role = m.role === 'tv' ? 'tv' : 'player';
       if (role === 'tv') {
         tvSockets.add(ws);
+        clearTimeout(tvGoneTimer);
         send(ws, syncFor(ws, true));
       } else {
         const p = attachPlayer(ws, m);
@@ -624,6 +639,7 @@ export function handleConnection(ws) {
   ws.on('close', () => {
     if (role === 'tv') {
       tvSockets.delete(ws);
+      if (!tvSockets.size) watchForDeadTv();
       // Gamepad players live on the TV connection.
       for (const p of [...players.values()]) {
         if (p.viaTv === ws) {

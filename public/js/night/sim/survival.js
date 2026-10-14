@@ -13,6 +13,20 @@ import { RS } from './regions.js';
 import { MAX_HP } from './player.js';
 
 export const DAY_SECS = 960;          // one in-game day, in real seconds
+export const SAVE_VERSION = 1;
+
+// Saves outlive updates: anything a later version adds gets a safe default
+// here, so an old slot always loads (new fields are filled, never required).
+export function migrateSave(s) {
+  if (!s || s.deleted) return null;
+  s.v ||= 0;
+  if (s.v < 1) {
+    s.looted ||= []; s.leftover ||= []; s.zones ||= []; s.packs ||= []; s.hordes ||= [];
+    s.mState ||= {}; s.mission ||= 0; s.day ||= 1; s.time ??= 0.3; s.others ||= [];
+  }
+  s.v = SAVE_VERSION;
+  return s;
+}
 const DAWN = 0.25, DUSK = 0.78;
 const SEARCH_T = 0.8, LOOT_RESPAWN_DAYS = 3;
 
@@ -62,6 +76,7 @@ export class Survival {
     }
     this.shelter = shelter ? new shelter(this) : null;
     if (this.shelter) this.id = 'shelter';
+    save = migrateSave(save);
     if (save) this.load(save);
     else this._spawnHorde(3);
     // Co-op option: one pack and one ammo bag for the whole group.

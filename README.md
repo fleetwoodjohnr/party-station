@@ -11,6 +11,10 @@ automatically so you can pick them up next game night.
 
 🃏 **Cards:** Hearts · Crazy 8s · Texas Hold'em · Blackjack · Go Fish · Spite &amp; Malice
 
+🧟 **Action:** [Dead of Night](#dead-of-night) — first-person 3D zombie survival on
+the TV: Classic waves, an Open World county, and a Shelter to fortify; co-op
+across screens. Played with controllers.
+
 ## How it plays
 
 - **The TV is the console screen.** Open `http://party-station.local/tv` on
@@ -110,11 +114,13 @@ On Raspberry Pi OS **Lite** there's no browser to run, so the kiosk is
 skipped — open `http://party-station.local/tv` in any browser on a smart
 TV, Fire stick, or a laptop plugged into the TV instead.
 
-> **Pi 4 (2GB) note:** the server itself is tiny and the TV view is plain
-> DOM — no WebGL required. Keep the kiosk to its one Chromium tab — that's
-> the normal setup and fits in 2GB. The one thing a Pi 4 genuinely can't do
-> is drive a **4K** screen, which is why the installer caps HDMI output at
-> 1080p — see [Display](#display).
+> **Pi 4 (2GB) note:** the server itself is tiny and the card tables are
+> plain DOM. Dead of Night is the one WebGL game (three.js, in the same kiosk
+> tab — no second browser or app), built for the Pi 4's GPU: see
+> [its performance notes](#performance-on-the-pi). Keep the kiosk to its one
+> Chromium tab — that's the normal setup and fits in 2GB. The one thing a
+> Pi 4 genuinely can't do is drive a **4K** screen, which is why the
+> installer caps HDMI output at 1080p — see [Display](#display).
 
 Android phones resolve `.local` names in modern versions; if a device can't,
 use the Pi's IP address. The TV shows it on every screen, it's on the
@@ -269,6 +275,89 @@ Blitz's 3dfx arcade board is NOT playable under MAME on a Pi — use the PS1
 port with `lr-pcsx-rearmed` instead. Want more systems (N64, GBA)? Install
 extra cores via `~/RetroPie-Setup/retropie_setup.sh`.
 
+## Dead of Night
+
+A first-person zombie survival game that lives on the hub's **🧟 Action**
+shelf. Pick it with a controller, press **Start** in the lobby, and choose a
+mode from its own menu:
+
+- **Classic Survival** — hold the Route 9 Diner through rounds that grow in
+  number, health and speed. Points for every hit and kill buy guns off the
+  walls, the kitchen and garage doors, six perk machines, the mystery crate
+  and the Forge (rarity upgrades + gunsmith). Specials join as the rounds
+  climb — crawlers, armored, brutes, spitters, screamers, exploders — and
+  **The Warden** comes every tenth round. *Standard* ends at dawn after round
+  30; *Endless* never does.
+- **Open World** — scavenge Hollis County: a 6×6-region map of woods, Maple
+  Street, Main Street, a military checkpoint, warehouses, a rendering plant
+  and outposts. Day and night (nights are faster and bring a hunting horde),
+  hunger and thirst, loot with carry weight, infected zones to clear, a
+  12-mission story radioed in from the farm, and three save slots.
+- **Shelter** — the open world plus building on Hollis Farm: walls and gates
+  (wood → metal → reinforced), sandbags, spikes, a watchtower, turrets and a
+  shocker on a fuelled generator, storage, a workbench, a medbay. A raid hits
+  every night from a different direction.
+
+**Controls** (remappable under *Controls*; glyphs follow your pad):
+
+| Button | Action | Button | Action |
+|---|---|---|---|
+| Left stick | Move | Right stick | Look / aim |
+| RT / R2 | Fire | LT / L2 | Aim down sights |
+| A / ✕ | Jump · confirm | B / ○ | Crouch · back |
+| X / □ | Reload · interact (hold to repair, search, revive) | Y / △ | Switch weapon |
+| RB / R1 | Lethal (frag, molotov, claymore) | LB / L1 | Tactical (noisemaker, stun) |
+| L3 | Sprint | R3 | Melee |
+| D-pad ▲ | Pack (survival modes) | D-pad ▼ | Medkit |
+| D-pad ◀ | Build mode (Shelter) | D-pad ▶ | Flashlight |
+| Start | Pause | Select | Objectives / map |
+
+Settings: look and aiming sensitivity, invert, dead zone, response curve, aim
+assist (off/low/standard), vibration, volume, graphics (Auto/Performance/
+Balanced/Quality) and a frame-rate readout. A controller that drops out
+pauses the game; any controller can pick it back up.
+
+**Co-op (2–4).** One player per screen: a second Party Station picks
+**🤝 Join a friend** on its chooser (it finds stations on the same network),
+or any laptop/TV browser opens `http://<host>/tv` with a controller paired to
+it. Everyone joins the lobby; the host's TV runs the game and the others
+render it live. Revive a downed friend by holding **X** beside them (30 s
+before they bleed out). In Open World/Shelter the lobby option *Co-op
+supplies* chooses one shared pack or one each.
+
+**Saves.** Settings, career rank/XP and records, and the world slots are
+stored by the station in `data/profiles/deadofnight/` (with a `.bak` of the
+previous copy), beside the card-game saves — they survive updates and
+reboots. Open World/Shelter autosave every two minutes and on quit; co-op
+survivors are saved by name in the host's world.
+
+### Performance on the Pi
+
+Built for a Pi 4 GPU rather than ported to it: all map lighting is baked
+into vertex colours (no runtime lights or shadows), zombies are one
+instanced mesh per body part (~5 draw calls for the whole horde), the shelter
+one per piece type, effects and props are pooled, the open world streams
+32 m chunks built in a Web Worker and drops far ones. The 3D view renders at
+640×360–1280×720 and is stretched to the screen (the HUD stays sharp), paced
+at 30 or 60 FPS; on *Auto* a governor lowers resolution and then the live
+zombie count when frames run late — a round keeps its zombies, they just
+arrive more slowly. Zombies only exist near the players; the rest of the
+county is numbers.
+
+Measure a station from any machine on the network (the TV must be on the
+hub; it takes the screen for about a minute):
+
+```bash
+curl -X POST 'http://party-station.local/api/bench'                  # flythrough, 40 zombies
+curl -X POST 'http://party-station.local/api/bench?scene=classic'    # the real game on autopilot from round 10
+curl -s http://party-station.local/api/status | jq .perf              # FPS p50/p95, draw calls, RAM, swap, kiosk memory, SoC °C
+```
+
+| Where | Scene | FPS (avg) | p95 frame | Notes |
+|---|---|---|---|---|
+| Raspberry Pi 4 (2GB) | — | *not measured yet* | — | run the bench above and record it here |
+| Dev box, headless software GL | flythrough, 40 zombies | 26.8 | 50 ms | CPU rendering — only proves it runs |
+
 ## Deploying updates
 
 The station updates itself from
@@ -327,7 +416,13 @@ npm start            # http://localhost:8080 (and /tv)
 npm run simulate     # bot-vs-bot integrity check for every turn-based game
 PORT=8090 node server/index.js &   # then, in another shell:
 PORT=8090 npm run e2e              # full websocket join/play/save/resume test
+npm run night                      # Dead of Night's headless simulation checks
+CHROME=/path/to/chrome PORT=8090 npm run night:smoke   # TV page + bench in headless Chrome
 ```
+
+> The self-updater runs whenever the server starts inside a git checkout and
+> resets it to `origin/main` once it differs — on a dev machine with local
+> commits, run the server from a copy without `.git` (or push first).
 
 Only the Pi answers to `party-station.local` (setup renames it); a dev box
 advertises its own hostname, so the server banner prints the name that will
@@ -349,7 +444,10 @@ state; the TV renders the shared table and phones render private views +
 controls. Bluetooth controllers are read by the TV via the Gamepad API and
 act through server-side "pad player" records that live on the TV's
 connection — so pads and phones are interchangeable seats. State snapshots
-land in `data/saves/*.json` after every action, debounced.
+land in `data/saves/*.json` after every action, debounced. Real-time
+("relay") games — Dead of Night — instead run their simulation in the TV
+browser; the server seats players, relays co-op traffic between screens and
+stores `/api/profiles`.
 
 Anything needing root (Wi-Fi, the display mode) goes through one small
 root-owned helper — `scripts/psctl`, installed as

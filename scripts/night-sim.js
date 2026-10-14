@@ -11,7 +11,7 @@ import { WEAPONS, falloff, newWeapon, statsOf, RARITY } from '../public/js/night
 import { zombieHp, roundTotal, WIN_ROUND, rankOf, xpForRank } from '../public/js/night/sim/classic.js';
 import { ZTYPES, S as ZS } from '../public/js/night/sim/zombies.js';
 import { generateWorld } from '../public/js/night/sim/regions.js';
-import { DAY_SECS, MISSIONS } from '../public/js/night/sim/survival.js';
+import { DAY_SECS, MISSIONS, migrateSave } from '../public/js/night/sim/survival.js';
 import { PIECES as PIECESx } from '../public/js/night/sim/shelter.js';
 import { HostNet, ClientNet, applyAct } from '../public/js/night/coop.js';
 
@@ -540,6 +540,20 @@ const shGame = (seed = 9, save = null) => new Game({ world: new World(generateWo
   Ph[1].points = 6000;
   assert.ok(applyAct(hostG, Ph[1], { a: 'forge' }) && Ph[1].weapon.tier === 1 && Ph[0].weapon.tier === 0);
   ok('co-op: client movement reaches the host, zombies mirror, client shots resolve on the host, revive, per-player actions');
+}
+
+// ---------------------------------------------------------------- phase 7
+{ // an old-format save still loads (fields added later get defaults)
+  const game = owGame(), P = game.players[0];
+  P.inv.wood = 5;
+  const save = JSON.parse(JSON.stringify(game.mode.serialize()));
+  for (const k of ['v', 'others', 'shelter', 'packs', 'explored', 'hordes', 'leftover', 'mState', 'looted']) delete save[k];
+  const g2 = owGame(9, save);
+  assert.equal(g2.players[0].inv.wood, 5);
+  assert.equal(migrateSave({ deleted: true }), null, 'a deleted slot should load as empty');
+  const sh = shGame(9, JSON.parse(JSON.stringify(save)));
+  assert.ok(sh.mode.shelter && sh.mode.shelter.count() === 0, 'a world save without a shelter must load into Shelter mode');
+  ok('saves from older versions load: missing fields get defaults, deleted slots read as empty');
 }
 
 console.log(`\nAll ${passed} Dead of Night sim checks passed.`);
