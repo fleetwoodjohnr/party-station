@@ -1,7 +1,7 @@
 // A survivor: first-person movement, weapons, melee, equipment, health,
 // and the controller aim assist. One Input object per tick drives it
 // (built from a gamepad by input.js, or by sim/bot.js). Pure JS — no DOM.
-import { MELEE, newWeapon, falloff, spreadOf, coneDir, statsOf } from './weapons.js';
+import { MELEE, WEAPONS, newWeapon, falloff, spreadOf, coneDir, statsOf } from './weapons.js';
 import { ZTYPES } from './zombies.js';
 
 export const STAND_EYE = 1.62, CROUCH_EYE = 1.05;
@@ -14,7 +14,7 @@ const ASSIST = { off: [0, 0, 0], low: [0.25, 0.35, 0.15], standard: [0.45, 0.6, 
 export function emptyInput() {
   return { mx: 0, my: 0, lookX: 0, lookY: 0, fire: false, firePressed: false, ads: false, jump: false,
     crouch: false, sprint: false, x: false, xPressed: false, swap: false, melee: false,
-    lethal: false, tactical: false, assist: 'standard' };
+    lethal: false, tactical: false, heal: false, assist: 'standard' };
 }
 
 export class Player {
@@ -39,9 +39,18 @@ export class Player {
     this.god = false;         // bench autopilot only
     this.infiniteAmmo = false;
     this.downT = 0;
+    this.ammo = null;   // survival modes: { light, rifle, shells, explosive }
+    this.inv = null;    // survival modes: item -> count
   }
 
   get weapon() { return this.weapons[this.cur]; }
+  // Spare rounds for a gun: its own reserve in Classic, the shared pool of
+  // that ammo type in the survival modes (this.ammo).
+  reserve(w = this.weapon) { return this.infiniteAmmo ? 1e9 : this.ammo ? (this.ammo[WEAPONS[w.id].ammo] || 0) : w.reserve; }
+  spend(w, n) {
+    if (this.infiniteAmmo) return;
+    if (this.ammo) this.ammo[WEAPONS[w.id].ammo] -= n; else w.reserve -= n;
+  }
   // Effective stats of the gun in hand (rarity, attachments, perks folded in).
   get W() { return statsOf(this.weapon, this.perks); }
   get melee() { return MELEE[this.meleeId]; }
@@ -110,6 +119,8 @@ export class Player {
     if (this.prompt && (inp.x || inp.xPressed)) game.mode.interact(this, this.prompt, dt, inp.xPressed);
     else if (inp.xPressed) this._startReload(game);
 
+    // D-pad down: medkit (survival modes keep an inventory).
+    if (inp.heal && this.inv) game.mode.useItem?.(this, 'meds');
     // Equipment: RB lethal, LB tactical.
     if (inp.lethal && this.lethal?.n > 0 && this.act !== 'melee') {
       if (game.equipment.throwFrom(this, this.lethal.id)) this.lethal.n--;
@@ -129,17 +140,17 @@ export class Player {
           // Shell by shell; firing interrupts once there's a round in.
           if (this.actT >= W.shellStart + W.shell) {
             this.actT = W.shellStart;
-            if (wpn.mag < W.mag && (wpn.reserve > 0 || this.infiniteAmmo)) {
-              wpn.mag++; if (!this.infiniteAmmo) wpn.reserve--;
+            if (wpn.mag < W.mag && this.reserve(wpn) > 0) {
+              wpn.mag++; this.spend(wpn, 1);
               game.ev({ e: 'shell', p: this.seat });
             }
-            if (wpn.mag >= W.mag || (wpn.reserve <= 0 && !this.infiniteAmmo)) this.act = 'idle';
+            if (wpn.mag >= W.mag || this.reserve(wpn) <= 0) this.act = 'idle';
           }
           if ((inp.fire || this.fireBuffer > 0) && wpn.mag > 0 && this.actT > 0.1) this.act = 'idle';
         } else if (this.actT >= (this._emptyReload ? W.emptyReload : W.reload)) {
-          const take = this.infiniteAmmo ? W.mag - wpn.mag : Math.min(W.mag - wpn.mag, wpn.reserve);
+          const take = Math.min(W.mag - wpn.mag, this.reserve(wpn));
           wpn.mag += take;
-          if (!this.infiniteAmmo) wpn.reserve -= take;
+          this.spend(wpn, take);
           this.act = 'idle';
           game.ev({ e: 'reloaded', p: this.seat });
         }
@@ -171,17 +182,17 @@ export class Player {
       if (wpn.mag > 0) {
         this._shoot(game);
         if (W.burst) { this.burstLeft--; if (this.burstLeft === 0 || wpn.mag === 0) { this.burstLeft = 0; this.fireCd = W.burstGap; } }
-      } else if (wpn.reserve > 0 || this.infiniteAmmo) { this.burstLeft = 0; this._startReload(game); }
+      } else if (this.reserve(wpn) > 0) { this.burstLeft = 0; this._startReload(game); }
       else if (inp.firePressed) game.ev({ e: 'dry', p: this.seat });
       this.fireBuffer = 0;
     }
     // Auto-reload an empty magazine once the trigger is let go.
-    if (wpn.mag === 0 && this.act === 'idle' && !inp.fire && (wpn.reserve > 0 || this.infiniteAmmo)) this._startReload(game);
+    if (wpn.mag === 0 && this.act === 'idle' && !inp.fire && this.reserve(wpn) > 0) this._startReload(game);
   }
 
   _startReload(game) {
     const W = this.W, wpn = this.weapon;
-    if (this.act !== 'idle' || wpn.mag >= W.mag || (wpn.reserve <= 0 && !this.infiniteAmmo)) return;
+    if (this.act !== 'idle' || wpn.mag >= W.mag || this.reserve(wpn) <= 0) return;
     this.act = 'reload'; this.actT = 0; this._emptyReload = wpn.mag === 0;
     this.sprinting = false; this.burstLeft = 0;
     game.ev({ e: 'reload', p: this.seat, w: wpn.id });

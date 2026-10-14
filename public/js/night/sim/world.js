@@ -19,8 +19,25 @@ const INF = 0xffffffff;
 
 export class World {
   constructor(def) {
-    const rows = def.rows;
     this.name = def.name;
+    this.windows = [];
+    this.doors = {};
+    if (def.cells) {
+      // Generated world (sim/regions.js): arrays come ready-made.
+      this.w = def.w; this.h = def.h;
+      this.cells = def.cells; this.surf = def.surf; this.paint = def.paint;
+      this.door = new Int8Array(this.w * this.h).fill(-1);
+      this.win = new Int16Array(this.w * this.h).fill(-1);
+      this.spawns = def.spawns; this.starts = def.starts;
+      this.containers = def.containers; this.pois = def.pois; this.zones = def.zones;
+      this.beds = def.beds; this.regions = def.regions; this.home = def.home;
+      this.wallbuys = []; this.machines = []; this.traps = [];
+      this.lamps = def.lamps;
+      this.version = 0;
+      this.openWorld = true;
+      return;
+    }
+    const rows = def.rows;
     this.w = rows[0].length;
     this.h = rows.length;
     this.cells = new Uint8Array(this.w * this.h);
@@ -28,8 +45,6 @@ export class World {
     this.win = new Int16Array(this.w * this.h).fill(-1);   // window index per cell
     this.spawns = [];
     this.starts = [];
-    this.windows = [];
-    this.doors = {};
     for (let y = 0; y < this.h; y++) {
       if (rows[y].length !== this.w) throw new Error(`${def.name}: row ${y} is ${rows[y].length} wide, expected ${this.w}`);
       for (let x = 0; x < this.w; x++) {
@@ -80,6 +95,12 @@ export class World {
   }
 
   idx(x, y) { return y * this.w + x; }
+  // Open world: which 64 m region a point is in (null on hand-built maps).
+  regionAt(x, z) {
+    if (!this.regions) return null;
+    const rx = Math.floor(x / 64), rz = Math.floor(z / 64);
+    return this.regions.find(r => r.rx === rx && r.rz === rz) || null;
+  }
   cell(x, y) {
     if (x < 0 || y < 0 || x >= this.w || y >= this.h) return C.VOID;
     return this.cells[y * this.w + x];
@@ -211,20 +232,33 @@ export class World {
   // zombie could cross. Boarded windows count as passable but expensive, so
   // the field leads zombies to the window they must break, not around it.
   // `next[i]` is the neighbour cell to step toward (-1 = at a target / stuck).
-  flow(targets) {
+  flow(targets, win = null) {
     const n = this.w * this.h, w = this.w;
     if (!this._dist) {
       this._dist = new Uint32Array(n);
       this._next = new Int32Array(n);
       this._cost = new Int8Array(n);
-      this._heap = new Int32Array(n * 8);
-      this._hk = new Uint32Array(n * 8);
+      this._stamp = new Uint32Array(n);
+      this._gen = 0;
     }
-    const dist = this._dist, next = this._next, cost = this._cost;
-    for (let i = 0; i < n; i++) cost[i] = this._stepCost(i % w, (i / w) | 0);
-    // A diagonal step is allowed only when both orthogonal cells are plain
-    // walkable (cost 1, never a window) and so is the destination.
-    dist.fill(INF); next.fill(-1);
+    const dist = this._dist, next = this._next, cost = this._cost, stamp = this._stamp;
+    // Only cells inside the window are (re)computed; outside it the
+    // field is stale, and stamp[] !== gen says so (zombies out there
+    // steer straight at their target instead).
+    const x0 = win ? Math.max(1, win[0]) : 0, z0 = win ? Math.max(1, win[1]) : 0;
+    const x1 = win ? Math.min(this.w - 2, win[2]) : this.w - 1, z1 = win ? Math.min(this.h - 2, win[3]) : this.h - 1;
+    const gen = ++this._gen;
+    for (let z = z0; z <= z1; z++) {
+      const a = z * w + x0, b = z * w + x1 + 1;
+      dist.fill(INF, a, b); next.fill(-1, a, b); stamp.fill(gen, a, b);
+      for (let i = a; i < b; i++) cost[i] = this._stepCost(i - z * w, z);
+    }
+    if (win) { // the window's rim is a wall, so the search never leaves it
+      for (let x = x0; x <= x1; x++) { cost[z0 * w + x] = -1; cost[z1 * w + x] = -1; }
+      for (let z = z0; z <= z1; z++) { cost[z * w + x0] = -1; cost[z * w + x1] = -1; }
+    }
+    const size0 = (x1 - x0 + 1) * (z1 - z0 + 1) * 8;
+    if (!this._heap || this._heap.length < size0) { this._heap = new Int32Array(size0); this._hk = new Uint32Array(size0); }
     const heap = this._heap, hk = this._hk;
     let size = 0;
     const push = (k, v) => {
@@ -237,19 +271,18 @@ export class World {
       hk[i] = k; heap[i] = v;
     };
     for (const [x, y] of targets) {
-      if (x < 0 || y < 0 || x >= w || y >= this.h) continue;
+      if (x <= x0 || y <= z0 || x >= x1 || y >= z1) continue;
       const i = y * w + x;
       dist[i] = 0;
       push(0, i);
     }
     const relax = (from, to, base) => {
       const c = cost[to];
-      if (c <= 0) return;
+      if (c <= 0 || stamp[to] !== gen) return;
       const nd = dist[from] + base * c;
       if (nd < dist[to]) { dist[to] = nd; next[to] = from; push(nd, to); }
     };
     while (size > 0) {
-      // pop
       const i = heap[0], key = hk[0];
       const k = hk[--size], v = heap[size];
       let j = 0;
@@ -262,8 +295,8 @@ export class World {
       }
       hk[j] = k; heap[j] = v;
       if (key > dist[i]) continue; // stale entry
-      // The map edge is always VOID (cost -1), so ±1/±w never wraps into
-      // a walkable cell on the far side.
+      // The map edge is always VOID (cost -1), and so is a window's rim,
+      // so ±1/±w never escapes into a cell we didn't set up.
       const e = i + 1, wst = i - 1, s2 = i + w, nn = i - w;
       relax(i, e, 10); relax(i, wst, 10); relax(i, s2, 10); relax(i, nn, 10);
       const ce = cost[e] === 1, cw = cost[wst] === 1, cs = cost[s2] === 1, cn = cost[nn] === 1;
@@ -272,7 +305,7 @@ export class World {
       if (cw && cs && cost[s2 - 1] === 1) relax(i, s2 - 1, 14);
       if (cw && cn && cost[nn - 1] === 1) relax(i, nn - 1, 14);
     }
-    return { dist, next };
+    return { dist, next, stamp, gen, valid: i => stamp[i] === gen };
   }
 
   // Multiplier for entering a cell (-1 = impassable for zombies).

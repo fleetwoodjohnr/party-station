@@ -6,8 +6,9 @@ import { Zombies, ZTYPES, ZT } from './zombies.js';
 import { Player, emptyInput } from './player.js';
 import { Equipment } from './equipment.js';
 import { Classic } from './classic.js';
+import { Survival } from './survival.js';
 
-export const MODES = { classic: Classic };
+export const MODES = { classic: Classic, world: Survival };
 
 // Small, fast, seedable PRNG (tests and co-op replays need determinism).
 export function mulberry32(seed) {
@@ -63,8 +64,16 @@ export class Game {
       key += cx + ',' + cz + ';';
     }
     const age = this.time - this._flowT;
-    if (!this._flow || (key !== this._flowKey && age > 0.2) || age > 1) {
-      this._flow = this.world.flow(cells);
+    // Open world: only a 64-cell window around the targets is solved (the
+    // rest of the county doesn't need paths), and a bit less often.
+    let win = null, minAge = 0.2;
+    if (this.world.openWorld && cells.length) {
+      const xs = cells.map(c => c[0]), zs = cells.map(c => c[1]);
+      win = [Math.min(...xs) - 32, Math.min(...zs) - 32, Math.max(...xs) + 32, Math.max(...zs) + 32];
+      minAge = 0.33;
+    }
+    if (!this._flow || (key !== this._flowKey && age > minAge) || age > 1) {
+      this._flow = this.world.flow(cells, win);
       this._flowKey = key;
       this._flowT = this.time;
     }

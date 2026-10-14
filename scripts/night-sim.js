@@ -10,6 +10,8 @@ import { botInput } from '../public/js/night/sim/bot.js';
 import { WEAPONS, falloff, newWeapon, statsOf, RARITY } from '../public/js/night/sim/weapons.js';
 import { zombieHp, roundTotal, WIN_ROUND, rankOf, xpForRank } from '../public/js/night/sim/classic.js';
 import { ZTYPES, S as ZS } from '../public/js/night/sim/zombies.js';
+import { generateWorld } from '../public/js/night/sim/regions.js';
+import { DAY_SECS, MISSIONS } from '../public/js/night/sim/survival.js';
 
 let passed = 0;
 const ok = label => { passed++; console.log(`✓ ${label}`); };
@@ -282,5 +284,106 @@ const evs = game => game.drain();
   assert.equal(rankOf(0), 1); assert.equal(rankOf(xpForRank(5)), 5); assert.equal(rankOf(xpForRank(5) - 1), 4);
   ok('Max Ammo and Carpenter work, Second Wind revives once, Standard ends at round 30, ranks add up');
 }
+
+// ---------------------------------------------------------------- phase 4
+{ // world generation
+  const a = generateWorld(9), b = generateWorld(9), c = generateWorld(10);
+  const sum = d => d.cells.reduce((s, v, i) => (s + v * (i % 97 + 1)) % 1000003, 0);
+  assert.equal(sum(a), sum(b), 'same seed, different county');
+  assert.notEqual(sum(a), sum(c));
+  const w = new World(a);
+  const full = w.flow([w.starts[0]]);
+  const reach = (x, z) => [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => full.dist[w.idx(Math.floor(x) + dx, Math.floor(z) + dz)] !== 0xffffffff);
+  for (const [k, p] of Object.entries(a.pois)) assert.ok(reach(p.x, p.z), `POI ${k} unreachable`);
+  const bad = a.containers.filter(c => !reach(c.x + 0.5, c.z + 0.5)).length;
+  assert.ok(bad <= a.containers.length * 0.02, `${bad} containers unreachable`);
+  for (const M of MISSIONS) if (M.poi) assert.ok(a.pois[M.poi], `mission ${M.id} has no ${M.poi}`);
+  ok(`Hollis County: ${a.w}×${a.h} m, ${a.containers.length} containers, ${a.zones.length} infected zones, ${Object.keys(a.pois).length} named places, deterministic`);
+}
+
+const owGame = (seed = 9, save = null) => new Game({ world: new World(generateWorld(seed)), mode: 'world', seed, modeOpts: { seed, save } });
+
+{ // the local horde: spawns out of sight, capped, returns home when left
+  const game = owGame(), P = game.players[0], Z = game.zombies, M = game.mode;
+  game.zcap = 20;
+  // Walk to Main Street (busy) and stand there a while.
+  const town = game.world.regions.find(r => r.type === 'town');
+  P.x = town.x + 0.5; P.z = town.z + 4.5; P.god = true;
+  run(game, 25);
+  assert.ok(Z.alive > 4 && Z.alive <= 20, `ambient count ${Z.alive}`);
+  const near = M._nearRegions(P).map(r => r.id);
+  const popBefore = near.reduce((a, id) => a + M.pop[id], 0);
+  // Teleport far away: what was around town goes back to town.
+  const far = game.world.regions.find(r => r.rx === 0 && r.rz === 5);
+  P.x = far.x; P.z = far.z;
+  run(game, 3);
+  const popAfter = near.reduce((a, id) => a + M.pop[id], 0);
+  assert.ok(popAfter > popBefore, 'despawned zombies did not return to their regions');
+  ok(`ambient zombies capped at 20; walking away returned ${popAfter - popBefore} of them to Main Street's population`);
+}
+
+{ // loot, mission 1, noise, sleep, save/load
+  const game = owGame(), P = game.players[0], W = game.world, M = game.mode;
+  P.god = true;
+  // Search three containers.
+  const near = W.containers.slice().sort((a, b) => Math.hypot(a.x - P.x, a.z - P.z) - Math.hypot(b.x - P.x, b.z - P.z));
+  let searched = 0;
+  for (const c of near) {
+    if (searched >= 3) break;
+    const spot = [[1, 0], [-1, 0], [0, 1], [0, -1]].find(([dx, dz]) => W.open(c.x + dx, c.z + dz));
+    if (!spot) continue;
+    P.x = c.x + spot[0] + 0.5; P.z = c.z + spot[1] + 0.5;
+    const before = M.mState.searched || 0;
+    for (let t = 0; t < 1.2; t += DT) { const i = emptyInput(); i.x = true; game.step(DT, [i]); }
+    if ((M.mState.searched || 0) > before) searched++;
+  }
+  run(game, 1);
+  assert.equal(searched, 3, 'could not search 3 containers');
+  assert.ok(M.mission >= 1, 'Stock up did not complete');
+  // Gunfire wakes a wandering zombie 20 m away.
+  const zi = game.zombies.spawn(ZT.walker, P.x + 20, P.z, 999, 1, 0.3, { rise: false, aware: false });
+  if (zi >= 0) {
+    game.zombies.state[zi] = ZS.WANDER;
+    M.onEvent({ e: 'shot', p: 0, noise: 1 });
+    assert.notEqual(game.zombies.state[zi], ZS.WANDER, 'shot did not wake it');
+  }
+  // Sleep through the night.
+  M.time = 0.9;
+  game.zombies.clear();
+  const bed = W.beds[0];
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1]]) {
+    P.x = bed.x + dx + 0.5; P.z = bed.z + dz + 0.5;
+    if (W.open(Math.floor(P.x), Math.floor(P.z)) && M.interactTarget(P)?.kind === 'bed') break;
+  }
+  assert.equal(M.interactTarget(P)?.kind, 'bed', 'no spot by the bed');
+  const dayBefore = M.day;
+  pressX(game);
+  assert.ok(!M.night && M.day === dayBefore + 1, 'sleeping did not bring the morning');
+  // Save and load.
+  P.inv.wood = 7; P.ammo.rifle = 33;
+  const save = JSON.parse(JSON.stringify(M.serialize()));
+  const g2 = owGame(9, save), P2 = g2.players[0];
+  assert.equal(g2.mode.day, M.day); assert.equal(P2.inv.wood, 7); assert.equal(P2.ammo.rifle, 33);
+  assert.equal(g2.mode.mission, M.mission); assert.equal(g2.mode.looted.size, M.looted.size);
+  assert.ok(Math.abs(P2.x - P.x) < 1e-6);
+  ok(`survival: 3 searches finish "Stock up", gunfire wakes wanderers, sleep skips to day ${M.day}, save/load round-trips (${JSON.stringify(save).length} bytes)`);
+}
+
+{ // hordes walk in when you're near, cost of a busy open-world step
+  const game = owGame(), P = game.players[0], M = game.mode;
+  P.god = true; game.zcap = 28;
+  M.hordes = [{ x: P.x + 30, z: P.z + 6, n: 15, tx: P.x, tz: P.z, active: false }];
+  run(game, 8);
+  assert.ok(M.hordes.length === 0 || M.hordes[0].n < 15, 'horde never materialised');
+  for (let k = game.zombies.alive; k < 28; k++) {
+    const at = M._ringCell(P, 6, 30); if (at) game.zombies.spawn(ZT.walker, at[0], at[1], 1e6, 1.1, k / 28, { rise: false });
+  }
+  const t0 = performance.now(), N = 600;
+  for (let k = 0; k < N; k++) { game.step(DT, [emptyInput()]); game.drain(); }
+  const ms = (performance.now() - t0) / N;
+  assert.ok(ms < 3, `open-world step too slow: ${ms.toFixed(3)} ms`);
+  ok(`horde materialised near the player; open-world step with ${game.zombies.alive} zombies: ${ms.toFixed(3)} ms`);
+}
+void DAY_SECS;
 
 console.log(`\nAll ${passed} Dead of Night sim checks passed.`);

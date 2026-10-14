@@ -22,7 +22,7 @@ export const ZTYPES = [
 ];
 export const ZT = Object.fromEntries(ZTYPES.map((t, i) => [t.id, i]));
 
-export const S = { FREE: 0, RISE: 1, CHASE: 2, BREACH: 3, ATTACK: 4, CLIMB: 5, DYING: 6, CHARGE: 7, SPIT: 8, SCREAM: 9, FUSE: 10, SLAM: 11 };
+export const S = { FREE: 0, RISE: 1, CHASE: 2, BREACH: 3, ATTACK: 4, CLIMB: 5, DYING: 6, CHARGE: 7, SPIT: 8, SCREAM: 9, FUSE: 10, SLAM: 11, WANDER: 12 };
 const RISE_T = 1.1, DIE_T = 1.4, BOARD_T = 1.2, WINDUP = 0.42, SWING_CD = 0.95;
 
 export class Zombies {
@@ -45,6 +45,9 @@ export class Zombies {
     this.burnT = f(); this.burnDps = f();
     this.burnBy = new Int8Array(n);
     this.chX = f(); this.chZ = f();             // charge heading
+    this.homeX = f(); this.homeZ = f();         // where an unaware zombie drifts around
+    this.senseT = f();                          // next awareness check
+    this.sight = 15;                            // metres a zombie notices you from (mode sets it)
     this.win = new Int16Array(n).fill(-1);
     this.target = new Int8Array(n);
     this.headKill = new Uint8Array(n); // died to a headshot (renderer pops the head)
@@ -57,13 +60,14 @@ export class Zombies {
   clear() { this.state.fill(S.FREE); this.alive = 0; this.deaths.length = 0; }
 
   // Lowest free slot (deterministic, so tests and co-op replay match).
-  spawn(type, x, z, hp, speed, rngv = 0.5) {
+  spawn(type, x, z, hp, speed, rngv = 0.5, { rise = true, aware = true } = {}) {
     for (let i = 0; i < this.n; i++) {
       if (this.state[i] !== S.FREE) continue;
       const T = ZTYPES[type];
-      this.state[i] = S.RISE;
+      this.state[i] = rise ? S.RISE : aware ? S.CHASE : S.WANDER;
       this.type[i] = type;
-      this.x[i] = x; this.z[i] = z; this.y[i] = -1.7 * T.size;
+      this.x[i] = x; this.z[i] = z; this.y[i] = rise ? -1.7 * T.size : 0;
+      this.homeX[i] = x; this.homeZ[i] = z; this.senseT[i] = rngv;
       this.yaw[i] = rngv * Math.PI * 2;
       this.hp[i] = this.maxHp[i] = hp;
       this.speed[i] = speed;
@@ -139,6 +143,7 @@ export class Zombies {
     }
     this.hp[i] -= amount;
     this.flinch[i] = 1;
+    this.alert(i);
     if (this.hp[i] > 0) return { kill: false, armor: broke };
     this._die(i, owner, head, how);
     return { kill: true, armor: broke };
@@ -149,6 +154,17 @@ export class Zombies {
     this.t[i] = 0;
     this.headKill[i] = head ? 1 : 0;
     this.deaths.push({ i, owner, head, how, type: this.type[i], x: this.x[i], z: this.z[i] });
+  }
+
+  // Something gave the player away (sight, a gunshot, being shot).
+  alert(i) {
+    if (this.state[i] === S.WANDER) { this.state[i] = S.CHASE; this.t[i] = 0; }
+  }
+  // A noise at (x, z) heard out to r metres wakes every zombie in range.
+  noise(x, z, r) {
+    for (let i = 0; i < this.n; i++) {
+      if (this.state[i] === S.WANDER && (this.x[i] - x) ** 2 + (this.z[i] - z) ** 2 < r * r) this.alert(i);
+    }
   }
 
   // Set alight (incendiary rounds, molotov fire): keeps the hottest burn.
@@ -188,7 +204,7 @@ export class Zombies {
         const d = (P.x - this.x[i]) ** 2 + (P.z - this.z[i]) ** 2;
         if (d < bd) { bd = d; best = p; }
       }
-      const special = this.state[i] >= S.CHARGE;
+      const special = this.state[i] >= S.CHARGE && this.state[i] <= S.SLAM; // mid-ability: full rate
       const every = special || bd < 225 ? 1 : bd < 1225 ? 3 : 8;
       if ((this.frame + i) % every !== 0) continue;
       const h = Math.min(this.acc[i], 0.25);
@@ -216,6 +232,25 @@ export class Zombies {
     this.t[i] += h;
     this.cd[i] = Math.max(0, this.cd[i] - h);
     switch (this.state[i]) {
+      case S.WANDER: {
+        // Unaware: shuffle around home until something gives you away.
+        this.senseT[i] -= h;
+        if (P && this.senseT[i] <= 0) {
+          this.senseT[i] = 0.5;
+          if (dist < this.sight && world.sees(this.x[i], 1.5, this.z[i], P.x, (P.y || 0) + 1.5, P.z)) { this.alert(i); return; }
+        }
+        if (this.t[i] > 3 + (this.seed[i] % 5)) {
+          this.t[i] = 0;
+          const a = (rng ? rng() : 0.5) * Math.PI * 2;
+          this.chX[i] = this.homeX[i] + Math.cos(a) * 5; this.chZ[i] = this.homeZ[i] + Math.sin(a) * 5;
+        }
+        if (this.chX[i] || this.chZ[i]) {
+          this._face(i, this.chX[i], this.chZ[i], h);
+          this._moveToward(i, this.chX[i], this.chZ[i], 0.45 * h, world);
+          this.walk[i] += h * 1.2;
+        }
+        return;
+      }
       case S.RISE:
         this.y[i] = Math.min(0, -1.7 * T.size + this.t[i] / RISE_T * 1.7 * T.size);
         if (this.t[i] >= RISE_T) { this.state[i] = S.CHASE; this.t[i] = 0; this.y[i] = 0; }
@@ -315,7 +350,7 @@ export class Zombies {
     // Same or neighbouring cell: go straight for the player. Otherwise
     // follow the field one cell ahead (aiming at that cell's centre).
     if (Math.abs(pcx - cx) > 1 || Math.abs(pcz - cz) > 1) {
-      const nx = flow.next[ci];
+      const nx = flow.stamp[ci] === flow.gen ? flow.next[ci] : -1;
       if (nx >= 0) {
         const ncx = nx % world.w, ncz = (nx - ncx) / world.w;
         if (world.cell(ncx, ncz) === C.WINDOW) {
@@ -333,7 +368,7 @@ export class Zombies {
         } else {
           tx = ncx + 0.5; tz = ncz + 0.5;
           // Look one more step ahead so corners are cut smoothly.
-          const nn = flow.next[nx];
+          const nn = flow.stamp[nx] === flow.gen ? flow.next[nx] : -1;
           if (nn >= 0) {
             const mx = nn % world.w, mz = (nn - mx) / world.w;
             if (world.cell(mx, mz) !== C.WINDOW && world.sees(this.x[i], 0.5, this.z[i], mx + 0.5, 0.5, mz + 0.5)) {

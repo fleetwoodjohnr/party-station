@@ -166,12 +166,13 @@ export class Hud {
     this._set('round', game.mode.round, r => { this.round.textContent = r > 0 ? String(r) : ''; });
     this._set('pts', P.points, p => { this.pts.textContent = p.toLocaleString(); });
     const wpn = P.weapon;
-    this._set('ammo', `${wpn.id}|${wpn.tier}|${wpn.mag}|${wpn.reserve}|${P.infiniteAmmo}|${W.mag}`, () => {
+    const spare = P.reserve(wpn);
+    this._set('ammo', `${wpn.id}|${wpn.tier}|${wpn.mag}|${spare}|${P.infiniteAmmo}|${W.mag}`, () => {
       const low = wpn.mag <= Math.ceil(W.mag * 0.25);
       this.ammo.replaceChildren(
         h('div', { class: 'n', style: wpn.tier ? `color:${W.rarity.color}` : '' }, weaponName(wpn)),
         h('span', { class: 'm' + (low ? ' low' : '') }, String(wpn.mag)),
-        h('span', { class: 'r' }, ` / ${P.infiniteAmmo ? '∞' : wpn.reserve}`));
+        h('span', { class: 'r' }, ` / ${P.infiniteAmmo ? '∞' : spare}`));
     });
     // What X would do here.
     const pr = P.prompt;
@@ -183,7 +184,7 @@ export class Hud {
       const cost = pr.cost && !pr.full ? ` <span class="${pr.afford ? 'c' : 'no'}">${pr.cost}</span>` : '';
       this.prompt.innerHTML = `${verb} ${this.input.glyph('reload')} ${pr.label}${cost}`;
     });
-    if (P.weapon.mag === 0 && P.weapon.reserve === 0 && !P.infiniteAmmo) this._set('noammo', 1, () => this.showNote('Out of ammo — buy more at a chalk outline', 3));
+    if (P.weapon.mag === 0 && spare === 0) this._set('noammo', 1, () => this.showNote(P.ammo ? 'Out of ammo — scavenge some, or switch guns' : 'Out of ammo — buy more at a chalk outline', 3));
     else this.last.noammo = 0;
   }
 }

@@ -1,289 +1,19 @@
 // three.js view of the simulation, built for a Raspberry Pi 4 GPU:
-// every static surface is merged per 16×16-cell chunk with its lighting
-// baked into vertex colours (MeshBasicMaterial — no runtime lights, no
-// shadows), zombies are one InstancedMesh per body part (~4 draw calls for
-// the whole horde, animated procedurally), and the weapon is drawn in a
-// second pass so it never clips into walls.
+// every static surface is merged per chunk with its lighting baked into
+// vertex colours (worldgeo.js; MeshBasicMaterial — no runtime lights, no
+// shadows). Small maps build at once; the open world streams 32-cell
+// chunks built in a Web Worker. Zombies are one InstancedMesh per body
+// part (~5 draw calls for the whole horde, animated procedurally), and the
+// weapon is drawn in a second pass so it never clips into walls. Day and
+// night, and the flashlight, are one shared shader patch.
 import * as THREE from '/vendor/three/three.module.js';
-import { C, CEIL, WIN_LO, WIN_HI, MAX_BOARDS } from './sim/world.js';
+import { CEIL, WIN_LO, WIN_HI, MAX_BOARDS } from './sim/world.js';
 import { ZTYPES, S } from './sim/zombies.js';
-import { PERKS } from './sim/weapons.js';
+import { buildWorld, hash } from './worldgeo.js';
 
 export { THREE };
 
 const lin = hex => new THREE.Color(hex); // sRGB hex -> linear rgb (ColorManagement)
-
-// ------------------------------------------------------------ baked light
-// Moonlight from one side, warm pools under the lamps, ambient occlusion
-// passed in by the caller. Computed once per vertex at build time.
-const MOON = new THREE.Vector3(-0.45, 0.75, -0.5).normalize();
-const MOON_RGB = [0.62, 0.72, 1.0];
-const LAMP_RGB = [1.25, 0.95, 0.62];
-
-function bake(world, px, py, pz, nx, ny, nz, ao, interior, out) {
-  let r, g, b;
-  if (interior) { r = 0.30; g = 0.28; b = 0.30; } else {
-    const m = Math.max(0, nx * MOON.x + ny * MOON.y + nz * MOON.z) * 0.4 + 0.19;
-    r = MOON_RGB[0] * m; g = MOON_RGB[1] * m; b = MOON_RGB[2] * m;
-  }
-  for (const [lx, lz] of world.lamps) {
-    const dx = lx - px, dy = (interior ? 2.9 : 4.2) - py, dz = lz - pz;
-    const d = Math.hypot(dx, dy, dz);
-    if (d > 8) continue;
-    const ndl = Math.max(0.2, (nx * dx + ny * dy + nz * dz) / d);
-    const f = (1 - d / 8) ** 2 * ndl * (interior ? 1.15 : 0.8);
-    r += LAMP_RGB[0] * f; g += LAMP_RGB[1] * f; b += LAMP_RGB[2] * f;
-  }
-  out[0] = r * ao; out[1] = g * ao; out[2] = b * ao;
-  return out;
-}
-
-// Deterministic per-cell noise for colour variety.
-const hash = (x, y, k = 0) => {
-  let h = (x * 374761393 + y * 668265263 + k * 2147483647) | 0;
-  h = Math.imul(h ^ (h >>> 13), 1274126177);
-  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
-};
-
-// Accumulates quads/triangles with vertex colours into one geometry.
-class Builder {
-  constructor() { this.pos = []; this.col = []; }
-  // Quad corners in CCW order seen from the front; one colour per corner.
-  quad(a, b, c, d, ca, cb, cc, cd) {
-    this.pos.push(...a, ...b, ...c, ...a, ...c, ...d);
-    this.col.push(...ca, ...cb, ...cc, ...ca, ...cc, ...cd);
-  }
-  tri(a, b, c, ca, cb, cc) {
-    this.pos.push(...a, ...b, ...c);
-    this.col.push(...ca, ...cb, ...cc);
-  }
-  geometry() {
-    if (!this.pos.length) return null;
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
-    g.setAttribute('color', new THREE.Float32BufferAttribute(this.col, 3));
-    g.computeBoundingSphere();
-    return g;
-  }
-}
-
-// ---------------------------------------------------------- world geometry
-const PAL = {
-  tileA: lin(0xe9e1cf), tileB: lin(0x2a2328), kitchen: lin(0x8c8f93),
-  grass: lin(0x3b4a2c), dirt: lin(0x4a4032), asphalt: lin(0x3a3b40), line: lin(0xd8d2b0),
-  wallOut: lin(0xb9c9c3), stripe: lin(0xb3343c), base: lin(0x5c5f66),
-  wallIn: lin(0xe8dcc0), wainscot: lin(0x7a2e2e), ceiling: lin(0x8b8678), roof: lin(0x2b2b30),
-  counter: lin(0xc23a3a), counterTop: lin(0xd8dde0), wood: lin(0x7a5232),
-  car: lin(0x6b4a3a), carTop: lin(0x7d6a5a), carDark: lin(0x18181c),
-  fence: lin(0x6b5135), trunk: lin(0x3b2a1e), leaf: lin(0x1f3a26), edge: lin(0x101a14),
-  sill: lin(0x8a7a62), door: lin(0x5a3c26),
-  concrete: lin(0x77746c), stain: lin(0x55524b), iron: lin(0x34363c), ember: lin(0xff8a2a), gold: lin(0xe0b040),
-};
-
-function shade(col, light, k = 1, jitter = 0) {
-  const j = 1 + jitter;
-  return [col.r * light[0] * k * j, col.g * light[1] * k * j, col.b * light[2] * k * j];
-}
-
-export function buildWorld(world, mapDef) {
-  const chunks = new Map();
-  const B = (x, z) => {
-    const k = (x >> 4) + ',' + (z >> 4);
-    if (!chunks.has(k)) chunks.set(k, new Builder());
-    return chunks.get(k);
-  };
-  const L = [0, 0, 0], L2 = [0, 0, 0], L3 = [0, 0, 0], L4 = [0, 0, 0];
-  const solidish = c => c === C.WALL || c === C.VOID || c === C.WINDOW;
-  const isInside = c => c === C.FLOOR || c === C.PROP || c === C.DOOR || c === C.MACHINE;
-  const building = c => isInside(c) || c === C.WALL || c === C.WINDOW;
-  const mach = new Map((mapDef.machines || []).map(m => [m.x + ',' + m.y, m]));
-  const inRect = (r, x, z) => r && x >= r[0] && x <= r[2] && z >= r[1] && z <= r[3];
-  const lot = mapDef.lot;
-  const inLot = (x, z) => lot && x >= lot[0] && x <= lot[2] && z >= lot[1] && z <= lot[3];
-
-  // Floor-level ambient occlusion at a grid corner: darker beside walls.
-  const cornerAO = (vx, vz) => {
-    let n = 0;
-    for (const [dx, dz] of [[-1, -1], [0, -1], [-1, 0], [0, 0]]) {
-      const cc = world.cell(vx + dx, vz + dz);
-      if (solidish(cc) || cc === C.PROP || cc === C.MACHINE) n++;
-    }
-    return 1 - n * 0.16;
-  };
-
-  // A vertical face of a cell, from y0 to y1. side: 0=+x 1=-x 2=+z 3=-z.
-  const face = (b, x, z, side, y0, y1, col, interior, k = 1, inset = 0) => {
-    let p, n;
-    if (side === 0) { p = [[x + 1 - inset, y0, z + 1], [x + 1 - inset, y0, z], [x + 1 - inset, y1, z], [x + 1 - inset, y1, z + 1]]; n = [1, 0, 0]; }
-    else if (side === 1) { p = [[x + inset, y0, z], [x + inset, y0, z + 1], [x + inset, y1, z + 1], [x + inset, y1, z]]; n = [-1, 0, 0]; }
-    else if (side === 2) { p = [[x, y0, z + 1 - inset], [x + 1, y0, z + 1 - inset], [x + 1, y1, z + 1 - inset], [x, y1, z + 1 - inset]]; n = [0, 0, 1]; }
-    else { p = [[x + 1, y0, z + inset], [x, y0, z + inset], [x, y1, z + inset], [x + 1, y1, z + inset]]; n = [0, 0, -1]; }
-    const aoLo = y0 < 0.01 ? 0.62 : 1;
-    const j = (hash(x, z, side) - 0.5) * 0.08;
-    const cs = p.map((q, i) => shade(col, bake(world, q[0], q[1], q[2], ...n, i < 2 ? aoLo : 1, interior, [L, L2, L3, L4][i]), k, j));
-    b.quad(p[0], p[1], p[2], p[3], ...cs);
-  };
-  const flat = (b, x, z, y, col, interior, down = false, k = 1, x0 = 0, x1 = 1, z0 = 0, z1 = 1, ao = false) => {
-    const p = [[x + x0, y, z + z1], [x + x1, y, z + z1], [x + x1, y, z + z0], [x + x0, y, z + z0]];
-    if (down) p.reverse();
-    const j = (hash(x, z, 7) - 0.5) * 0.1;
-    const cs = p.map((q, i) => shade(col, bake(world, q[0], q[1], q[2], 0, down ? -1 : 1, 0,
-      ao ? cornerAO(Math.round(q[0]), Math.round(q[2])) : 1, interior, [L, L2, L3, L4][i]), k, j));
-    b.quad(p[0], p[1], p[2], p[3], ...cs);
-  };
-  const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]];
-
-  for (let z = 0; z < world.h; z++) {
-    for (let x = 0; x < world.w; x++) {
-      const c = world.cell(x, z);
-      const b = B(x, z);
-      const inside = isInside(c);
-      // Ground / floor.
-      if (inside) {
-        const tile = inRect(mapDef.garage, x, z) ? (hash(x, z, 4) > 0.8 ? PAL.stain : PAL.concrete)
-          : inRect(mapDef.kitchen, x, z) ? PAL.kitchen : ((x + z) & 1 ? PAL.tileA : PAL.tileB);
-        flat(b, x, z, 0, tile, true, false, 1, 0, 1, 0, 1, true);
-        flat(b, x, z, CEIL, PAL.ceiling, true, true, 0.9);
-      } else if (c !== C.WALL && c !== C.WINDOW) {
-        let col = PAL.grass;
-        if (inLot(x, z)) col = (x % 5 === 0 && z === lot[1] + 2) ? PAL.line : PAL.asphalt;
-        else if (hash(x, z, 3) > 0.7) col = PAL.dirt;
-        flat(b, x, z, 0, col, false, false, 1, 0, 1, 0, 1, true);
-      }
-      // Roof over the whole building footprint (seen from outside).
-      if (building(c)) flat(b, x, z, CEIL + 0.25, PAL.roof, false);
-
-      for (let s = 0; s < 4; s++) {
-        const [dx, dz] = SIDES[s];
-        const nc = world.cell(x + dx, z + dz);
-        const nIn = isInside(nc);
-        const nOpen = nc === C.FLOOR || nc === C.GROUND || nc === C.DOOR || nc === C.PROP || nc === C.WINDOW || nc === C.CAR || nc === C.FENCE || nc === C.TREE || nc === C.MACHINE;
-        if (c === C.WALL && nOpen && nc !== C.WINDOW) {
-          if (nIn) {
-            face(b, x, z, s, 0, 1.0, PAL.wainscot, true);
-            face(b, x, z, s, 1.0, CEIL, PAL.wallIn, true);
-          } else {
-            face(b, x, z, s, 0, 0.5, PAL.base, false);
-            face(b, x, z, s, 0.5, 2.55, PAL.wallOut, false);
-            face(b, x, z, s, 2.55, 2.85, PAL.stripe, false);
-            face(b, x, z, s, 2.85, CEIL + 0.25, PAL.wallOut, false);
-          }
-        } else if (c === C.WALL && nc === C.WINDOW) {
-          face(b, x, z, s, WIN_LO, WIN_HI, PAL.sill, true, 0.8); // window jamb
-        } else if (c === C.WINDOW && (nc === C.FLOOR || nc === C.GROUND || nc === C.PROP)) {
-          const col = nIn ? PAL.wallIn : PAL.wallOut;
-          face(b, x, z, s, 0, WIN_LO, nIn ? PAL.wainscot : PAL.base, nIn);
-          face(b, x, z, s, WIN_HI, CEIL + (nIn ? 0 : 0.25), col, nIn);
-        } else if (c === C.MACHINE && nc !== C.MACHINE && (nOpen || nIn)) {
-          machineFace(b, x, z, s, mach.get(x + ',' + z), face);
-        } else if (c === C.PROP && nIn && nc !== C.PROP) {
-          face(b, x, z, s, 0, 0.92, PAL.counter, true);
-          face(b, x, z, s, 0.92, 1.0, PAL.counterTop, true);
-        } else if (c === C.CAR && nc !== C.CAR && nOpen) {
-          face(b, x, z, s, 0, 0.3, PAL.carDark, false);
-          face(b, x, z, s, 0.3, 0.95, PAL.car, false);
-        } else if (c === C.VOID && nOpen) {
-          face(b, x, z, s, 0, 5, PAL.edge, false, 0.9);
-        } else if (c === C.FENCE && nc !== C.FENCE && nOpen) {
-          const along = world.cell(x + 1, z) === C.FENCE || world.cell(x - 1, z) === C.FENCE;
-          if (along ? dz !== 0 : dx !== 0) face(b, x, z, s, 0, 1.2, PAL.fence, false, 1, 0.42);
-          else face(b, x, z, s, 0, 1.2, PAL.fence, false, 0.8, 0.42);
-        }
-      }
-      if (c === C.WINDOW) {
-        flat(b, x, z, WIN_LO, PAL.sill, false);
-        flat(b, x, z, WIN_HI, PAL.sill, false, true, 0.7);
-      }
-      if (c === C.PROP) flat(b, x, z, 1.0, PAL.counterTop, true, false, 1.05);
-      if (c === C.MACHINE) {
-        const m = mach.get(x + ',' + z);
-        const [h2, top] = m?.kind === 'crate' ? [0.95, PAL.wood] : m?.kind === 'forge' ? [1.3, PAL.ember] : [2.1, PAL.iron];
-        flat(b, x, z, h2, top, true, false, m?.kind === 'forge' ? 2.2 : 1);
-      }
-      if (c === C.CAR) {
-        flat(b, x, z, 0.95, PAL.carTop, false);
-        // Cabin on the car's first cell only, inset — reads as a wreck.
-        if (world.cell(x - 1, z) !== C.CAR && world.cell(x, z - 1) !== C.CAR) {
-          const horiz = world.cell(x + 1, z) === C.CAR;
-          const cx0 = 0.2, cx1 = horiz ? 1.6 : 0.8, cz0 = 0.15, cz1 = horiz ? 0.85 : 1.6;
-          flat(b, x, z, 1.4, PAL.carTop, false, false, 0.9, cx0, cx1, cz0, cz1);
-          const q = (a, bb, cc, d) => b.quad(a, bb, cc, d, ...[a, bb, cc, d].map(() => shade(PAL.carDark, [0.25, 0.27, 0.32])));
-          q([x + cx0, 0.95, z + cz1], [x + cx1, 0.95, z + cz1], [x + cx1, 1.4, z + cz1], [x + cx0, 1.4, z + cz1]);
-          q([x + cx1, 0.95, z + cz0], [x + cx0, 0.95, z + cz0], [x + cx0, 1.4, z + cz0], [x + cx1, 1.4, z + cz0]);
-          q([x + cx1, 0.95, z + cz1], [x + cx1, 0.95, z + cz0], [x + cx1, 1.4, z + cz0], [x + cx1, 1.4, z + cz1]);
-          q([x + cx0, 0.95, z + cz0], [x + cx0, 0.95, z + cz1], [x + cx0, 1.4, z + cz1], [x + cx0, 1.4, z + cz0]);
-        }
-      }
-      if (c === C.FENCE) {
-        const along = world.cell(x + 1, z) === C.FENCE || world.cell(x - 1, z) === C.FENCE;
-        if (along) flat(b, x, z, 1.2, PAL.fence, false, false, 1, 0, 1, 0.42, 0.58);
-        else flat(b, x, z, 1.2, PAL.fence, false, false, 1, 0.42, 0.58, 0, 1);
-      }
-      if (c === C.TREE) tree(b, world, x + 0.5, z + 0.5, hash(x, z, 9));
-    }
-  }
-  const meshes = [];
-  for (const b of chunks.values()) {
-    const g = b.geometry();
-    if (g) meshes.push(g);
-  }
-  return meshes;
-}
-
-// Perk machines, the mystery crate and the Forge: a body plus a band of
-// colour that ignores the baked light, so it reads as lit from inside.
-const GLOW = [1.35, 1.35, 1.35];
-function machineFace(b, x, z, s, m, face) {
-  if (m?.kind === 'crate') {
-    face(b, x, z, s, 0, 0.8, PAL.wood, true);
-    face(b, x, z, s, 0.8, 0.95, PAL.gold, true, 1.3);
-    return;
-  }
-  if (m?.kind === 'forge') {
-    face(b, x, z, s, 0, 1.1, PAL.iron, true);
-    face(b, x, z, s, 1.1, 1.3, PAL.ember, true, 2.2);
-    return;
-  }
-  const col = lin(PERKS[m?.perk]?.color || '#888888');
-  face(b, x, z, s, 0, 1.2, col.clone().multiplyScalar(0.45), true);
-  // The lit sign: drawn with flat light so it glows in the dark diner.
-  const p = s === 0 ? [[x + 1, 1.25, z + 1], [x + 1, 1.25, z], [x + 1, 1.9, z], [x + 1, 1.9, z + 1]]
-    : s === 1 ? [[x, 1.25, z], [x, 1.25, z + 1], [x, 1.9, z + 1], [x, 1.9, z]]
-      : s === 2 ? [[x, 1.25, z + 1], [x + 1, 1.25, z + 1], [x + 1, 1.9, z + 1], [x, 1.9, z + 1]]
-        : [[x + 1, 1.25, z], [x, 1.25, z], [x, 1.9, z], [x + 1, 1.9, z]];
-  const lit = shade(col, GLOW);
-  b.quad(p[0], p[1], p[2], p[3], lit, lit, lit, lit);
-  face(b, x, z, s, 1.9, 2.1, col.clone().multiplyScalar(0.35), true);
-}
-
-// Low-poly pine: a trunk and two six-sided cones, colours baked.
-function tree(b, world, cx, cz, r) {
-  const L = [0, 0, 0];
-  const s = 0.85 + r * 0.4;
-  const trunkC = PAL.trunk, leaf = PAL.leaf;
-  const tw = 0.18;
-  const corners = [[-tw, -tw], [tw, -tw], [tw, tw], [-tw, tw]];
-  for (let i = 0; i < 4; i++) {
-    const [ax, az] = corners[i], [bx, bz] = corners[(i + 1) % 4];
-    const nx = (az + bz) === 0 ? Math.sign(ax + bx) : 0, nz = (ax + bx) === 0 ? Math.sign(az + bz) : 0;
-    const col = shade(trunkC, bake(world, cx, 1, cz, nx, 0, nz, 1, false, L));
-    b.quad([cx + bx, 0, cz + bz], [cx + ax, 0, cz + az], [cx + ax, 2.2 * s, cz + az], [cx + bx, 2.2 * s, cz + bz], col, col, col, col);
-  }
-  for (const [y0, y1, rad] of [[1.6, 4.6, 1.7], [3.3, 6.6, 1.2]]) {
-    const top = [cx, y1 * s, cz];
-    for (let i = 0; i < 6; i++) {
-      const a0 = i / 6 * Math.PI * 2 + r, a1 = (i + 1) / 6 * Math.PI * 2 + r;
-      const p0 = [cx + Math.cos(a0) * rad * s, y0 * s, cz + Math.sin(a0) * rad * s];
-      const p1 = [cx + Math.cos(a1) * rad * s, y0 * s, cz + Math.sin(a1) * rad * s];
-      const am = (a0 + a1) / 2;
-      const nx = Math.cos(am) * 0.8, nz = Math.sin(am) * 0.8;
-      const cb = shade(leaf, bake(world, p0[0], p0[1], p0[2], nx, 0.5, nz, 0.75, false, [0, 0, 0]), 1, (hash(i, y0 | 0, 5) - 0.5) * 0.2);
-      const ct = shade(leaf, bake(world, cx, top[1], cz, nx, 0.5, nz, 1.1, false, [0, 0, 0]));
-      b.tri(p1, p0, top, cb, cb, ct);
-      b.tri(p0, p1, [cx, y0 * s, cz], cb, cb, cb);
-    }
-  }
-}
 
 // --------------------------------------------------------------- zombies
 // Box parts with a top-lit gradient baked in; instanceColor tints them.
@@ -477,10 +207,98 @@ class Boards {
   }
 }
 
+// ---------------------------------------------------------- flashlight
+// One patch for every MeshBasicMaterial that should catch the torch: a
+// cone around the view axis that brightens what it falls on, fading with
+// distance. Uniforms are shared, so one value switches it everywhere.
+const FLASH = { value: 0 };
+function torchable(mat) {
+  mat.onBeforeCompile = sh => {
+    sh.uniforms.uFlash = FLASH;
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vTorch;')
+      .replace('#include <project_vertex>', '#include <project_vertex>\nvTorch = mvPosition.xyz;');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform float uFlash;\nvarying vec3 vTorch;')
+      .replace('#include <fog_fragment>', `if (uFlash > 0.0) {
+          float d = length(vTorch);
+          float cone = smoothstep(0.82, 0.97, -vTorch.z / max(d, 0.001));
+          float att = clamp(1.0 - d / 24.0, 0.0, 1.0) * (0.35 + 0.65 * smoothstep(0.4, 2.8, d));
+          gl_FragColor.rgb = gl_FragColor.rgb * (1.0 + uFlash * cone * att * 2.2) + uFlash * cone * att * 0.02;
+        }
+        #include <fog_fragment>`);
+  };
+  mat.customProgramCacheKey = () => 'torch';
+  return mat;
+}
+
+// ---------------------------------------------------------- open world
+// Streams 32×32-cell chunks around the camera: built in geo-worker.js,
+// uploaded here, dropped again once far behind.
+const CH = 32, LOAD_R = 2.6, DROP_R = 4;
+class Streamer {
+  constructor(view, world, def) {
+    this.view = view;
+    this.chunks = new Map(); // key -> mesh | 'pending' | null
+    this.pending = 0;
+    this.worker = new Worker(new URL('./geo-worker.js', import.meta.url), { type: 'module' });
+    this.worker.postMessage({ t: 'world', def: {
+      name: def.name, w: def.w, h: def.h, cells: def.cells, surf: def.surf, paint: def.paint,
+      lamps: def.lamps, spawns: [], starts: def.starts, containers: [], pois: {}, zones: [], beds: [], regions: [],
+    } });
+    this.worker.onmessage = ({ data: m }) => {
+      if (m.t !== 'chunk') return;
+      this.pending--;
+      if (this.chunks.get(m.key) !== 'pending') return; // dropped while building
+      if (m.empty) { this.chunks.set(m.key, null); return; }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(m.pos, 3));
+      g.setAttribute('color', new THREE.BufferAttribute(m.col, 3));
+      g.computeBoundingSphere();
+      const mesh = new THREE.Mesh(g, view.staticMat);
+      mesh.matrixAutoUpdate = false;
+      view.scene.add(mesh);
+      this.chunks.set(m.key, mesh);
+    };
+  }
+  update(x, z) {
+    const cx = x / CH, cz = z / CH;
+    // Request the nearest missing chunk(s); two in flight at most.
+    let best = null, bd = Infinity;
+    for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) {
+      const kx = Math.floor(cx) + dx, kz = Math.floor(cz) + dz;
+      if (kx < 0 || kz < 0 || kx * CH >= this.view.world.w || kz * CH >= this.view.world.h) continue;
+      const d = Math.hypot(kx + 0.5 - cx, kz + 0.5 - cz);
+      if (d > LOAD_R || this.chunks.has(kx + ',' + kz)) continue;
+      if (d < bd) { bd = d; best = [kx, kz]; }
+    }
+    if (best && this.pending < 2) {
+      const key = best[0] + ',' + best[1];
+      this.chunks.set(key, 'pending');
+      this.pending++;
+      const x0 = best[0] * CH, z0 = best[1] * CH;
+      this.worker.postMessage({ t: 'chunk', key, x0, z0, x1: Math.min(this.view.world.w, x0 + CH), z1: Math.min(this.view.world.h, z0 + CH) });
+    }
+    for (const [key, mesh] of this.chunks) {
+      const [kx, kz] = key.split(',').map(Number);
+      if (Math.hypot(kx + 0.5 - cx, kz + 0.5 - cz) <= DROP_R) continue;
+      if (mesh && mesh !== 'pending') { this.view.scene.remove(mesh); mesh.geometry.dispose(); }
+      this.chunks.delete(key);
+    }
+  }
+  loaded() { let n = 0; for (const m of this.chunks.values()) if (m && m !== 'pending') n++; return n; }
+  dispose() {
+    this.worker.terminate();
+    for (const mesh of this.chunks.values()) if (mesh && mesh !== 'pending') { this.view.scene.remove(mesh); mesh.geometry.dispose(); }
+    this.chunks.clear();
+  }
+}
+
 // ------------------------------------------------------------- renderer
+const NIGHT_SKY = lin(0x0a0f1e), DAY_SKY = lin(0x8fa6bf), DUSK_SKY = lin(0x6a4a5a);
+
 export class View {
-  constructor(holder, world, mapDef, pool) {
-    this.world = world;
+  constructor(holder) {
     this.canvas = document.createElement('canvas');
     this.canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block;image-rendering:auto';
     holder.appendChild(this.canvas);
@@ -495,47 +313,69 @@ export class View {
     this.gpu = String(dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
 
     this.scene = new THREE.Scene();
-    const sky = lin(0x0a0f1e);
-    this.scene.background = sky;
-    this.scene.fog = new THREE.Fog(sky, 10, 44);
+    this.scene.background = NIGHT_SKY.clone();
+    this.scene.fog = new THREE.Fog(NIGHT_SKY.clone(), 10, 44);
     this.camera = new THREE.PerspectiveCamera(62, 16 / 9, 0.05, 70);
-
-    const mat = new THREE.MeshBasicMaterial({ vertexColors: true });
-    this.static = buildWorld(world, mapDef).map(g => {
-      const m = new THREE.Mesh(g, mat);
-      m.matrixAutoUpdate = false;
-      this.scene.add(m);
-      return m;
-    });
+    this.staticMat = torchable(new THREE.MeshBasicMaterial({ vertexColors: true }));
     this._sky();
-    this.doors = {};
-    for (const d of Object.values(world.doors)) {
-      const xs = d.cells.map(c => c[0]), zs = d.cells.map(c => c[1]);
-      const x0 = Math.min(...xs), x1 = Math.max(...xs) + 1, z0 = Math.min(...zs), z1 = Math.max(...zs) + 1;
-      const g = partGeo(x1 - x0 - 0.04, CEIL - 0.02, z1 - z0 - 0.04, false);
-      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, color: PAL.door.clone().multiplyScalar(0.8) }));
-      m.position.set((x0 + x1) / 2, 0, (z0 + z1) / 2);
-      this.scene.add(m);
-      this.doors[d.id] = m;
-    }
-    this.horde = new Horde(this.scene, pool);
-    this.boards = new Boards(this.scene, world);
-
     // First-person weapon, drawn after a depth clear so it never clips.
     this.vmScene = new THREE.Scene();
     this.vmCam = new THREE.PerspectiveCamera(55, 16 / 9, 0.01, 5);
     this.vm = null;
     this.res = { w: 960, h: 540 };
     this.setResolution(960, 540);
+    this.statics = [];
+    this.doors = {};
+  }
+
+  // Show a world: the hand-built map is built whole; the open world streams.
+  setWorld(world, mapDef, pool) {
+    for (const m of this.statics) { this.scene.remove(m); m.geometry.dispose(); }
+    this.statics = [];
+    for (const m of Object.values(this.doors)) { this.scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
+    this.doors = {};
+    this.streamer?.dispose(); this.streamer = null;
+    if (this.horde) for (const m of [this.horde.torso, this.horde.head, this.horde.arm, this.horde.leg, this.horde.extra]) { this.scene.remove(m); m.geometry.dispose(); }
+    if (this.boards) { this.scene.remove(this.boards.mesh); this.boards.mesh.geometry.dispose(); }
+    this.world = world;
+    if (world.openWorld) {
+      this.streamer = new Streamer(this, world, mapDef);
+      this.scene.fog.far = 60; this.camera.far = 80;
+    } else {
+      for (const g0 of buildWorld(world, mapDef)) {
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.BufferAttribute(g0.pos, 3));
+        g.setAttribute('color', new THREE.BufferAttribute(g0.col, 3));
+        g.computeBoundingSphere();
+        const m = new THREE.Mesh(g, this.staticMat);
+        m.matrixAutoUpdate = false;
+        this.scene.add(m);
+        this.statics.push(m);
+      }
+      this.scene.fog.far = 44; this.camera.far = 70;
+      for (const d of Object.values(world.doors)) {
+        const xs = d.cells.map(c => c[0]), zs = d.cells.map(c => c[1]);
+        const x0 = Math.min(...xs), x1 = Math.max(...xs) + 1, z0 = Math.min(...zs), z1 = Math.max(...zs) + 1;
+        const g = partGeo(x1 - x0 - 0.04, CEIL - 0.02, z1 - z0 - 0.04, false);
+        const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, color: new THREE.Color(0x5a3c26).multiplyScalar(0.8) }));
+        m.position.set((x0 + x1) / 2, 0, (z0 + z1) / 2);
+        this.scene.add(m);
+        this.doors[d.id] = m;
+      }
+    }
+    this.camera.updateProjectionMatrix();
+    this.horde = new Horde(this.scene, pool);
+    torchable(this.horde.torso.material);
+    this.boards = new Boards(this.scene, world);
   }
 
   _sky() {
-    // Moon disc + a scatter of stars; both ignore fog.
-    const moon = new THREE.Mesh(new THREE.CircleGeometry(3.2, 20),
+    // Moon (or sun) disc + a scatter of stars; both ignore fog.
+    this.moon = new THREE.Mesh(new THREE.CircleGeometry(3.2, 20),
       new THREE.MeshBasicMaterial({ color: lin(0xf3ead0), fog: false }));
-    moon.position.set(-38, 34, -50);
-    moon.lookAt(0, 0, 0);
-    this.scene.add(moon);
+    this.moon.position.set(-38, 34, -50);
+    this.moon.lookAt(0, 0, 0);
+    this.scene.add(this.moon);
     const pts = [];
     for (let i = 0; i < 260; i++) {
       const a = hash(i, 1) * Math.PI * 2, e = 0.15 + hash(i, 2) * 1.2;
@@ -546,6 +386,23 @@ export class View {
     this.stars = new THREE.Points(g, new THREE.PointsMaterial({ color: 0xbfc8ff, size: 1.5, sizeAttenuation: false, fog: false }));
     this.scene.add(this.stars);
   }
+
+  // 0 = midnight, 1 = noon. Tints every baked surface (they're lit for
+  // night), and moves fog, sky, stars and the moon/sun.
+  setDaylight(k, dusk = 0) {
+    k = Math.max(0, Math.min(1, k));
+    const tint = 1 + k * 1.55;
+    this.staticMat.color.setRGB(tint, tint * 0.98, tint * (0.95 + 0.05 * (1 - k)));
+    this.horde?.torso.material.color.setScalar(0.65 + 0.5 * k);
+    const sky = this.scene.background;
+    sky.copy(NIGHT_SKY).lerp(DAY_SKY, k).lerp(DUSK_SKY, dusk * 0.6);
+    this.scene.fog.color.copy(sky);
+    this.scene.fog.near = 10 + k * 15;
+    this.stars.visible = k < 0.3;
+    this.moon.material.color.set(k > 0.5 ? 0xfff6d0 : 0xf3ead0);
+  }
+
+  setFlashlight(on) { FLASH.value = on ? 1 : 0; }
 
   // Internal render size; CSS stretches the canvas over the screen.
   setResolution(w, h) {
@@ -570,9 +427,11 @@ export class View {
     this.camera.position.set(x, y, z);
     this.camera.rotation.set(pitch, yaw, roll, 'YXZ');
     this.stars.position.set(x, 0, z);
+    this.moon.position.set(x - 38, 34, z - 50);
   }
 
   render(now) {
+    this.streamer?.update(this.camera.position.x, this.camera.position.z);
     const live = this.horde.update(now);
     this.boards.update();
     for (const [id, m] of Object.entries(this.doors)) m.visible = !this.world.doors[id].open;
@@ -588,6 +447,7 @@ export class View {
   }
 
   dispose() {
+    this.streamer?.dispose();
     this.renderer.dispose();
     this.scene.traverse(o => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
     this.vmScene.traverse(o => { o.geometry?.dispose?.(); o.material?.dispose?.(); });

@@ -4,6 +4,11 @@
 // game-over / dawn screens.
 import { THREE } from './render.js';
 import { Game } from './sim/game.js';
+import { World } from './sim/world.js';
+import { Zombies } from './sim/zombies.js';
+import { DINER } from './sim/maps.js';
+import { generateWorld } from './sim/regions.js';
+import { SurvivalHud, mapScreen, inventoryScreen } from './ow-ui.js';
 import { emptyInput } from './sim/player.js';
 import { botInput } from './sim/bot.js';
 import { WEAPONS, PERKS, RARITY } from './sim/weapons.js';
@@ -24,7 +29,8 @@ export class PlayState {
   constructor(app, opts = {}) {
     this.app = app;
     this.opts = opts;
-    this.scene = opts.autopilot ? 'bench-classic' : 'classic';
+    this.kind = opts.mode || 'classic';   // classic | world | shelter
+    this.scene = opts.autopilot ? 'bench-classic' : this.kind;
   }
 
   enter() {
@@ -32,12 +38,28 @@ export class PlayState {
     const seat = a.ctx.seats?.[0];
     this.career = this.opts.career || { xp: 0 };
     this.rank = rankOf(this.career.xp || 0);
-    this.game = new Game({
-      world: a.world, zombies: a.pool, mode: 'classic',
-      seats: [{ name: seat && !seat.bot ? seat.name : 'Survivor' }],
-      seed: (Math.random() * 2 ** 31) | 0,
-      modeOpts: { startRound: this.opts.startRound || 1, standard: !!this.opts.standard, rank: this.rank },
-    });
+    const seats = [{ name: seat && !seat.bot ? seat.name : 'Survivor' }];
+    if (this.kind === 'classic') {
+      this.world = a.world; this.pool = a.pool;
+      this.game = new Game({
+        world: a.world, zombies: a.pool, mode: 'classic', seats,
+        seed: (Math.random() * 2 ** 31) | 0,
+        modeOpts: { startRound: this.opts.startRound || 1, standard: !!this.opts.standard, rank: this.rank },
+      });
+    } else {
+      // A whole county from its seed (same seed = same map for a save).
+      const save = this.opts.save;
+      const seed = save?.seed ?? ((Math.random() * 1e9) | 0);
+      this.world = new World(generateWorld(seed));
+      this.pool = new Zombies(48);
+      a.view.setWorld(this.world, this.world, this.pool);
+      this.game = new Game({
+        world: this.world, zombies: this.pool, mode: 'world', seats, seed,
+        modeOpts: { seed, save },
+      });
+      this.slot = this.opts.slot || 1;
+      this.flash = false;
+    }
     const P = this.P = this.game.players[0];
     this.home = [P.x, P.z];
     if (this.opts.autopilot) {
@@ -47,13 +69,13 @@ export class PlayState {
     this.fx = new Effects(a.view.scene);
     this.props = new WorldProps(a.view.scene);
     this.signs = [];
-    for (const b of a.world.wallbuys) {
+    for (const b of this.world.wallbuys) {
       const m = chalkSign(b.weapon ? WEAPONS[b.weapon].model : b.melee || b.equip);
       m.position.set(b.x + 0.5 + b.face[0] * 0.505, 1.55, b.y + 0.5 + b.face[1] * 0.505);
       m.rotation.y = Math.atan2(b.face[0], b.face[1]);
       a.view.scene.add(m); this.signs.push(m);
     }
-    for (const t of a.world.traps) {
+    for (const t of this.world.traps) {
       const m = chalkSign('text', `TRAP\n${t.cost}`);
       const L = t.lever;
       m.scale.setScalar(0.7);
@@ -62,7 +84,7 @@ export class PlayState {
       a.view.scene.add(m); this.signs.push(m);
     }
     this.doorSigns = [];
-    for (const d of Object.values(a.world.doors)) {
+    for (const d of Object.values(this.world.doors)) {
       const xs = d.cells.map(c => c[0]), zs = d.cells.map(c => c[1]);
       const x0 = Math.min(...xs), x1 = Math.max(...xs) + 1, z0 = Math.min(...zs), z1 = Math.max(...zs) + 1;
       const alongZ = (x1 - x0) < (z1 - z0);
@@ -79,6 +101,11 @@ export class PlayState {
     this.hudLayer = h('div', { class: 'nn-layer' });
     a.root.insertBefore(this.hudLayer, a.uiLayer);
     this.hud = new Hud(this.hudLayer, a.input);
+    if (this.kind !== 'classic') {
+      this.sv = new SurvivalHud(this.hudLayer);
+      this.hud.round.style.display = 'none';
+      this.hud.pts.style.display = 'none';
+    }
     this.menus = new Stack(a.uiLayer, a.input, n => audio.ui(n));
     a.uiLayer.replaceChildren();
     audio.volume(a.settings.volume / 10 * 0.9);
@@ -121,6 +148,7 @@ export class PlayState {
     inp.x = I.down('reload'); inp.xPressed = I.pressed('reload');
     inp.swap = I.pressed('swap'); inp.melee = I.pressed('melee');
     inp.lethal = I.pressed('lethal'); inp.tactical = I.pressed('tactical');
+    inp.heal = I.pressed('heal');
     inp.assist = s.aimAssist;
     return inp;
   }
@@ -147,6 +175,16 @@ export class PlayState {
       return;
     }
     if (I.pressed('pause') && !this.opts.autopilot) { this.openPause(false); return; }
+    if (this.sv) {
+      // Survival extras: map (Select), pack (D-pad up), torch (D-pad right).
+      if (I.pressed('map')) { this.menus.push(mapScreen(a, this.menus, g)); return; }
+      if (I.pressed('inv')) { this.menus.push(inventoryScreen(a, this.menus, g, P, () => this.vmFor())); return; }
+      if (I.pressed('dright')) { this.flash = !this.flash; this.flashSet = true; audio.ui('blip'); }
+      const [day, dusk] = g.mode.daylight();
+      a.view.setDaylight(day, dusk);
+      if (!this.flashSet) this.flash = day < 0.25;
+      a.view.setFlashlight(this.flash);
+    }
     g.zcap = a.gov.cap;
     let inp = this.opts.autopilot ? botInput(g, P, this.home) : this.readInput(dt);
     const look = [inp.lookX / Math.max(dt, 1e-3), inp.lookY / Math.max(dt, 1e-3)];
@@ -164,7 +202,8 @@ export class PlayState {
     this.vmFor();
     const scoped = this.vm.def.scope && P.ads > 0.85;
     this.hud.update(dt, P, g, a.view.res.h, a.view.camera.fov * Math.PI / 180, scoped);
-    this.hud.objectives(I.down('map') && !this.opts.autopilot, g.mode);
+    if (this.sv) this.sv.update(P, g.mode);
+    else this.hud.objectives(I.down('map') && !this.opts.autopilot, g.mode);
     this.pose(dt, now, look[0] * 0.015, look[1] * 0.015);
     // Footsteps.
     const step = Math.floor(P.stepPhase / Math.PI);
@@ -234,7 +273,7 @@ export class PlayState {
           break;
         case 'impact': this.fx.burst(e.x, e.y, e.z, 4, this.fx.dust, 1.5, 0.04, 1, 0.45); break;
         case 'board': {
-          const W = this.app.world.windows[e.w];
+          const W = this.world.windows[e.w];
           this.fx.burst(W.x + 0.5, 1.5, W.y + 0.5, 6, this.fx.wood, 2.5, 0.08);
           const [pan, vol] = this.where(W.x + 0.5, W.y + 0.5);
           audio.board(pan, Math.max(0.15, vol));
@@ -323,6 +362,26 @@ export class PlayState {
         case 'dry': audio.dry(); break;
         case 'knife': audio.knife(); break;
         case 'land': audio.land(); break;
+        case 'loot': if (e.p === P.seat) { this.sv?.showLoot(e.items, e.full); audio.buy(); } break;
+        case 'used': audio.perk('quickhands'); this.hud.showNote({ food: 'Ate', water: 'Drank', meds: 'Patched up' }[e.item] || 'Used', 1.2); break;
+        case 'zoneEnter': this.hud.showNote(`Infected zone — ${e.name}`, 2.5); audio.roar(0, 0.5); break;
+        case 'zoneCleared': this.hud.showBanner('Zone cleared', e.name, 3); audio.victory(); break;
+        case 'horde': this.hud.showNote('A horde is coming!', 2.5); audio.roar(0, 0.9); break;
+        case 'dusk': this.hud.showBanner('Nightfall', 'They’re faster in the dark', 3); audio.roundStart(); break;
+        case 'dawn': this.hud.showBanner(`Day ${g.mode.day}`, 'You made it to morning', 3); audio.roundEnd(); break;
+        case 'missionDone':
+          audio.victory();
+          this.hud.showBanner(e.final ? 'The convoy is coming' : 'Mission complete', `${e.title} · +${e.xp} XP`, 3.5);
+          break;
+        case 'missionNote': this.hud.showNote(e.text, 2.5); break;
+        case 'missionFail': this.hud.showNote(`${e.title} failed — ${e.why}`, 3); audio.denied(); break;
+        case 'respawn':
+          this.hud.showBanner('You woke up at the farm', e.pack ? 'Your pack is where you fell (see the map)' : '', 4);
+          this.camDrop = 0; this.camRoll = 0;
+          break;
+        case 'slept': this.hud.showBanner(`Day ${e.day}`, 'Rested', 2.5); break;
+        case 'noSleep': this.hud.showNote('You can’t sleep with zombies nearby', 2); audio.denied(); break;
+        case 'autosave': this.saveWorld(); break;
         case 'roundStart':
           audio.roundStart();
           this.hud.showBanner(`Round ${e.round}`, e.boss ? 'Something big is coming' : e.round === 1 ? 'They’re coming' : 'Here they come');
@@ -370,7 +429,7 @@ export class PlayState {
     poseViewmodel(this.vm, P, dt, now / 1000, lookX, lookY);
     this.fx.update(dt);
     this.props.update(this.game, now / 1000);
-    for (const s of this.doorSigns) if (this.app.world.doors[s.id].open) s.m.visible = false;
+    for (const s of this.doorSigns) if (this.world.doors[s.id].open) s.m.visible = false;
   }
 
   openPause(lost) {
@@ -381,8 +440,12 @@ export class PlayState {
       { label: 'Settings', act: () => this.menus.push(settingsScreen(a, this.menus)) },
       { label: 'Controls', act: () => this.menus.push(controlsScreen(a, this.menus)) },
       { label: 'Restart', sub: 'Back to round 1', act: async () => { await this.saveStats(this.game.mode.round); a.setState(new PlayState(a, { standard: this.opts.standard, career: this.career })); } },
-      { label: 'Quit to Party Station', act: () => { this.saveStats(this.game.mode.round); a.quit(); } },
+      { label: 'Quit to Party Station', act: async () => { if (this.sv) await this.saveWorld(); else this.saveStats(this.game.mode.round); a.quit(); } },
     ];
+    if (this.sv) {
+      // Survival: no restart; save and leave instead.
+      items.splice(3, 1, { label: 'Save', sub: `Slot ${this.slot}`, act: async () => { await this.saveWorld(); this.hud.showNote('Saved', 1.5); this.menus.clear(); } });
+    }
     const menu = new Menu(items, { onBack: () => this.menus.clear() });
     this.menus.push({
       handle: (input, sfx) => menu.handle(input, sfx),
@@ -418,9 +481,28 @@ export class PlayState {
     });
   }
 
+  // Survival: the whole world into its slot, and the XP earned since the
+  // last save into the career.
+  async saveWorld() {
+    if (!this.sv) return;
+    const P = this.P;
+    const data = this.game.mode.serialize();
+    await saveProfile(`${this.kind}-${this.slot}`, data);
+    const gained = P.xp - (this._banked || 0);
+    if (gained > 0) {
+      this._banked = P.xp;
+      const c = (await loadProfile('career')) || { xp: 0 };
+      c.xp = (c.xp || 0) + gained;
+      c.kills = (c.kills || 0) + P.kills - (this._bankedKills || 0);
+      this._bankedKills = P.kills;
+      this.career = c;
+      await saveProfile('career', c);
+    }
+  }
+
   // Career: XP, best round, totals — one profile, updated once per match.
   async saveStats(round, won = false) {
-    if (this.opts.autopilot || this._saved) return;
+    if (this.opts.autopilot || this._saved || this.sv) return;
     this._saved = true;
     const survived = Math.max(0, round - 1);
     const c = (await loadProfile('career')) || { xp: 0, bestRound: 0, games: 0, kills: 0, wins: 0 };
@@ -450,6 +532,12 @@ export class PlayState {
     this._vmGroup?.traverse(o => { o.geometry?.dispose(); o.material?.dispose(); });
     this.hudLayer.remove();
     a.uiLayer.replaceChildren();
+    if (this.sv) {
+      // Back to the diner for the title screen.
+      a.view.setFlashlight(false);
+      a.view.setDaylight(0);
+      a.view.setWorld(a.world, DINER, a.pool);
+    }
     a.pool.clear();
     a.world.reset();
   }

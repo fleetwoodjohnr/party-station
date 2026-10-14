@@ -10,6 +10,7 @@ import { PadInput, DEFAULT_SETTINGS } from './input.js';
 import { injectStyles, h, mount, Menu, hints } from './ui.js';
 import { audio } from './audio.js';
 import { Stack, settingsScreen, controlsScreen, careerScreen, modeScreen } from './menus.js';
+import { slotsScreen } from './ow-ui.js';
 import { PlayState } from './play.js';
 
 const GAME = 'deadofnight';
@@ -122,7 +123,8 @@ class App {
     this.perfEl = h('div', { class: 'nn-perf', style: 'display:none' });
     root.append(this.canvasLayer, this.uiLayer, this.perfEl);
     try {
-      this.view = new View(this.canvasLayer, this.world, DINER, this.pool);
+      this.view = new View(this.canvasLayer);
+      this.view.setWorld(this.world, DINER, this.pool);
     } catch (e) {
       console.error('Dead of Night: WebGL unavailable', e);
       mount(this.uiLayer, h('div', { class: 'nn-center' }, h('div', { class: 'nn-panel' },
@@ -257,6 +259,8 @@ class TitleState {
     const play = opts => a.setState(new PlayState(a, { ...opts, career: this.career || { xp: 0 } }));
     this.menu = new Menu([
       { label: 'Classic Survival', sub: 'Hold the Route 9 Diner — doors, perks, the Forge, a Warden every tenth round', act: () => this.stack.push(modeScreen(a, this.stack, play)) },
+      { label: 'Open World', sub: 'Scavenge Hollis County, day and night — missions, loot, hordes',
+        act: async () => this.stack.push(await slotsScreen(a, this.stack, 'world', (slot, save) => play({ mode: 'world', slot, save }))) },
       { label: 'Career', sub: 'Rank, unlocks and records', act: () => this.stack.push(careerScreen(a, this.stack, this.career)) },
       { label: 'Settings', act: () => this.stack.push(settingsScreen(a, this.stack)) },
       { label: 'Controls', act: () => this.stack.push(controlsScreen(a, this.stack)) },
