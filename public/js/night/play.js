@@ -19,7 +19,7 @@ import { botInput } from './sim/bot.js';
 import { WEAPONS, PERKS, RARITY } from './sim/weapons.js';
 import { EQUIP } from './sim/equipment.js';
 import { rankOf } from './sim/classic.js';
-import { buildViewmodel, poseViewmodel, muzzleFlash, Effects, WorldProps, chalkSign, vmKey } from './gear.js';
+import { buildViewmodel, poseViewmodel, muzzleFlash, Effects, WorldProps, chalkSign, vmKey, gunModel } from './gear.js';
 import { Hud } from './hud.js';
 import { audio } from './audio.js';
 import { h, Menu, hints } from './ui.js';
@@ -64,7 +64,7 @@ export class PlayState {
       seed = this.opts.seed ?? save?.seed ?? seed;
       this.world = new World(generateWorld(seed));
       this.pool = new Zombies(48);
-      a.view.setWorld(this.world, this.world, this.pool);
+      a.view.setWorld(this.world, this.world, this.pool, a.gov.maxCap);
       this.game = new Game({
         world: this.world, zombies: this.pool, mode: this.kind, seats, seed,
         modeOpts: { seed, save, sharedLoot: a.ctx.options?.coopLoot === 'shared' },
@@ -92,6 +92,13 @@ export class PlayState {
       m.position.set(b.x + 0.5 + b.face[0] * 0.505, 1.55, b.y + 0.5 + b.face[1] * 0.505);
       m.rotation.y = Math.atan2(b.face[0], b.face[1]);
       a.view.scene.add(m); this.signs.push(m);
+      if (b.weapon) {
+        // The real gun hangs on the wall over its chalk outline.
+        const g = gunModel({ id: b.weapon, att: {} });
+        g.position.set(m.position.x + b.face[0] * 0.05, 1.5, m.position.z + b.face[1] * 0.05);
+        g.rotation.y = m.rotation.y + Math.PI / 2;
+        a.view.scene.add(g); this.signs.push(g);
+      }
     }
     for (const t of this.world.traps) {
       const m = chalkSign('text', `TRAP\n${t.cost}`);
@@ -331,6 +338,12 @@ export class PlayState {
           audio.gun(WEAPONS[e.w].sound);
           muzzleFlash(this.vm);
           const heavy = ['shotgun', 'sniper', 'marksman', 'explosive'].includes(WEAPONS[e.w].cls);
+          if (!P.weapon.att?.muzzle || P.weapon.att.muzzle !== 'suppressor') view.muzzle(heavy ? 1 : 0.6);
+          // A spent case flicks out to the right (shells are red).
+          if (WEAPONS[e.w].cls !== 'explosive') {
+            this.mz.set(0.12 * (1 - P.ads) + 0.05, -0.06, -0.35).applyMatrix4(view.camera.matrixWorld);
+            this.fx.burst(this.mz.x, this.mz.y, this.mz.z, 1, WEAPONS[e.w].cls === 'shotgun' ? this.fx.shell : this.fx.brass, 1.6, 0.02, 1.4, 0.9);
+          }
           I.rumble(heavy ? 0.7 : 0.25, 0.35, heavy ? 140 : 60);
           if (e.end) {
             this.mz.set(0.13 * (1 - P.ads), -0.09, -0.7).applyMatrix4(view.camera.matrixWorld);
@@ -694,7 +707,7 @@ export class PlayState {
     const a = this.app;
     this.menus.closed = true;
     audio.ambience(false);
-    for (const m of this.signs) { a.view.scene.remove(m); m.geometry.dispose(); m.material.map?.dispose(); m.material.dispose(); }
+    for (const m of this.signs) { a.view.scene.remove(m); m.traverse(o => { o.geometry?.dispose(); o.material?.map?.dispose(); o.material?.dispose(); }); }
     for (const { m } of this.doorSigns) { a.view.scene.remove(m); m.geometry.dispose(); m.material.map?.dispose(); m.material.dispose(); }
     for (const o of [this.fx.parts, this.fx.tracers, this.props.mesh]) { a.view.scene.remove(o); o.geometry.dispose(); o.material.dispose(); }
     a.view.setViewmodel(null);
@@ -707,7 +720,7 @@ export class PlayState {
       // Back to the diner for the title screen.
       a.view.setFlashlight(false);
       a.view.setDaylight(0);
-      a.view.setWorld(a.world, DINER, a.pool);
+      a.view.setWorld(a.world, DINER, a.pool, a.gov.maxCap);
     }
     a.pool.clear();
     a.world.reset();

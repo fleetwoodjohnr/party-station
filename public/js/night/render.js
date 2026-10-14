@@ -7,242 +7,270 @@
 // weapon is drawn in a second pass so it never clips into walls. Day and
 // night, and the flashlight, are one shared shader patch.
 import * as THREE from '/vendor/three/three.module.js';
-import { CEIL, WIN_LO, WIN_HI, MAX_BOARDS } from './sim/world.js';
+import { C, CEIL, WIN_LO, WIN_HI, MAX_BOARDS } from './sim/world.js';
 import { ZTYPES, S } from './sim/zombies.js';
-import { buildWorld, hash } from './worldgeo.js';
+import { buildWorld, hash, L } from './worldgeo.js';
+import { clone as cloneSkinned } from '/vendor/three/addons/SkeletonUtils.js';
+import { assets } from './assets.js';
+import { gunModel } from './gear.js';
 
 export { THREE };
 
 const lin = hex => new THREE.Color(hex); // sRGB hex -> linear rgb (ColorManagement)
 
-// --------------------------------------------------------------- zombies
-// Box parts with a top-lit gradient baked in; instanceColor tints them.
-function partGeo(w, h, d, pivotTop) {
+// Box parts with a top-lit gradient baked in (boards, doors), textured
+// with one layer of the world's texture array.
+function partGeo(w, h, d, pivotTop, layer = 0) {
   const g = new THREE.BoxGeometry(w, h, d);
   g.translate(0, pivotTop ? -h / 2 : h / 2, 0);
   const pos = g.getAttribute('position');
-  const col = new Float32Array(pos.count * 3);
+  const col = new Float32Array(pos.count * 3), tuv = new Float32Array(pos.count * 3);
   for (let i = 0; i < pos.count; i++) {
     const y = pos.getY(i);
     const t = pivotTop ? (y + h) / h : y / h;
     const v = 0.55 + 0.45 * t;
     col[i * 3] = col[i * 3 + 1] = col[i * 3 + 2] = v;
+    tuv[i * 3] = pos.getX(i) + pos.getZ(i); tuv[i * 3 + 1] = y; tuv[i * 3 + 2] = layer;
   }
   g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  g.setAttribute('tuv', new THREE.BufferAttribute(tuv, 3));
   g.deleteAttribute('normal');
   g.deleteAttribute('uv');
   return g;
 }
 
+// --------------------------------------------------------------- zombies
+// Each live zombie borrows a skinned CC0 body (assets.js) from a free list
+// per model, with its own mixer and material (for tint and hit flashes).
+// The sim's state picks the clip; far and off-screen bodies animate at a
+// lower rate. Model, extra scale and skin tint per type:
+const ZLOOK = {
+  walker: ['zombie', 1, null], runner: ['zombie', 1, 0xe0a49a], crawler: ['zombie', 1, 0xbcc4a4],
+  armored: ['zombie', 1, 0x98a2ac], brute: ['brute', 1, null], spitter: ['zombie', 1, 0xb0ff78],
+  screamer: ['zombie', 1, 0xf4eee0], exploder: ['zombie', 1, 0xf6e27a], warden: ['brute', 1, 0xc8604e],
+  climber: ['zombie', 1, 0xc4c8de],
+};
+// Clip names per model, and the ground speed (m/s at scale 1) each
+// locomotion clip was animated for, so feet roughly keep up.
+const ZCLIPS = {
+  zombie: { walk: 'Walk', run: 'Run_Arms', idle: 'Idle', attack: 'Punch', grab: 'Idle_Attack', die: 'Death', crawl: 'Crawl', walkV: 0.9, runV: 2.6, crawlV: 0.7 },
+  brute: { walk: 'Walk', run: 'Run', idle: 'Idle', attack: 'Attack', grab: 'Attack', die: 'Death', crawl: 'Walk', walkV: 1.6, runV: 4.2, crawlV: 1.6 },
+};
+const BURN = new THREE.Color(0xff6a10), HIT = new THREE.Color(0x902010), FUSE = new THREE.Color(0xfff060);
+
 class Horde {
   constructor(scene, pool) {
+    this.scene = scene;
     this.pool = pool;
-    const n = pool.n;
-    const mat = new THREE.MeshBasicMaterial({ vertexColors: true });
-    const mk = (geo, count) => {
-      const m = new THREE.InstancedMesh(geo, mat, count);
-      m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-      m.frustumCulled = false; // instances roam; one bound would be wrong
-      m.count = 0;
-      m.setColorAt(0, new THREE.Color(1, 1, 1));
-      scene.add(m);
-      return m;
-    };
-    this.torso = mk(partGeo(0.46, 0.62, 0.27, false), n);
-    this.head = mk(partGeo(0.3, 0.32, 0.3, false), n);
-    this.arm = mk(partGeo(0.12, 0.64, 0.12, true), n * 2);
-    this.leg = mk(partGeo(0.16, 0.8, 0.17, true), n * 2);
-    // Unit box for everything type-specific: helmets, vests, sacs, horns.
-    this.extra = mk(partGeo(1, 1, 1, false), n * 5);
-    this.m = new THREE.Matrix4(); this.root = new THREE.Matrix4(); this.loc = new THREE.Matrix4();
-    this.q = new THREE.Quaternion(); this.e = new THREE.Euler(); this.v = new THREE.Vector3(); this.sc = new THREE.Vector3();
-    this.col = new THREE.Color();
-    this.skins = [0x7d9a6c, 0x8fa27a, 0x6e8466, 0x9aa07c, 0x7a8a72].map(lin);
-    this.cloth = [0x4a4a5c, 0x6b3a3a, 0x3a4f6b, 0x5c5236, 0x3f5c45, 0x705a4a].map(lin);
-    this.pants = [0x2b2d38, 0x3a3226, 0x2e3b4a].map(lin);
-    // Per-type skin / shirt overrides (null = the random palette).
-    this.look = {
-      runner: [null, 0x7a2222], crawler: [0x6a7a5c, 0x3a3a3a], armored: [null, 0x3c4238],
-      brute: [0x5f6f52, 0x5a4636], spitter: [0x8fbf5a, 0x4a5a2a], screamer: [0xc9c7b6, 0x6a6a72],
-      exploder: [0xb8b06a, 0x8a7a3a], warden: [0x6a2a24, 0x1e1a1a], climber: [0xa8b090, 0x33333c],
-    };
-    for (const k of Object.keys(this.look)) this.look[k] = this.look[k].map(c => (c == null ? null : lin(c)));
-    this.helmetC = lin(0x3f4636); this.plateC = lin(0x2f342c); this.sacC = lin(0x9be05a); this.hornC = lin(0xd8cfb8);
-    this.fuseC = lin(0xffe04a);
-    this.eyeC = lin(0xd8e070).multiplyScalar(2.2); // a faint glow — they read in the dark
+    this.slots = new Array(pool.n).fill(null);
+    this.free = { zombie: [], brute: [] };
+    this.tint = new THREE.Color();
+    this.last = 0;
+  }
+  // Clone bodies up front (a clone is a few ms; not mid-fight).
+  prewarm(n) {
+    while (this.free.zombie.length < n) this.free.zombie.push(this._make('zombie'));
+    while (this.free.brute.length < 3) this.free.brute.push(this._make('brute'));
+  }
+  _make(model) {
+    const A = assets.chars[model];
+    const body = cloneSkinned(A.scene);
+    const inner = new THREE.Group(), root = new THREE.Group();
+    inner.add(body); root.add(inner);
+    const z = { model, root, inner, body, mixer: new THREE.AnimationMixer(body), actions: {}, cur: null, acc: 0, seed: -1, type: -1 };
+    body.traverse(o => {
+      if (o.isSkinnedMesh) {
+        o.material = o.material.clone();
+        z.mat = o.material;
+        // Generous bounds around the feet-origin body, so culling works.
+        o.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, A.height / 2 + A.minY, 0), A.height);
+        o.frustumCulled = true;
+      }
+      if (o.isBone && o.name === 'Head') z.head = o;
+      if (o.isBone && !z.spine && (o.name === 'Torso' || o.name === 'Body')) z.spine = o;
+    });
+    root.visible = false;
+    this.scene.add(root);
+    return z;
+  }
+  _take(model) { return this.free[model].pop() || this._make(model); }
+  _release(z) {
+    z.root.visible = false;
+    z.mixer.stopAllAction();
+    z.cur = null;
+    if (z.head) z.head.scale.setScalar(1);
+    this.free[z.model].push(z);
+  }
+  // Fit a body to its sim type: top of the head just over the hit sphere.
+  _dress(z, T, look) {
+    const A = assets.chars[z.model];
+    const s = (T.headY + T.headR + 0.06) * T.size * look[1] / A.height;
+    z.inner.scale.set(s * (T.id === 'exploder' ? 1.25 : 1), s, s * (T.id === 'exploder' ? 1.25 : 1));
+    z.inner.position.y = -A.minY * s;
+    z.base = this.tint.set(look[2] ?? 0xffffff).clone();
+    z.mat.color.copy(z.base);
+  }
+  _play(z, name, rate, once) {
+    const a = z.actions[name] || (z.actions[name] = z.mixer.clipAction(assets.chars[z.model].clips[name]));
+    a.timeScale = rate;
+    if (z.cur === a) return;
+    a.reset();
+    a.setLoop(once ? THREE.LoopOnce : THREE.LoopRepeat, Infinity);
+    a.clampWhenFinished = once;
+    a.play();
+    if (z.cur) a.crossFadeFrom(z.cur, 0.18, false);
+    z.cur = a;
+  }
+  _clip(z, T, st, i) {
+    const c = ZCLIPS[z.model], P = this.pool;
+    const spd = P.speed[i] / T.size;
+    switch (st) {
+      case S.DYING: return [c.die, 1, true];
+      case S.ATTACK: case S.SPIT: return [c.attack, 1.3, false];
+      case S.SLAM: return [c.attack, 0.6, false];
+      case S.BREACH: case S.CLIMB: case S.SCREAM: return [c.grab, 1.1, false];
+      case S.RISE: case S.FUSE: return [c.idle, 1, false];
+      case S.WANDER: return [T.crawl ? c.crawl : c.walk, 0.55, false];
+      default:
+        if (T.crawl) return [c.crawl, Math.max(0.5, spd / c.crawlV), false];
+        if (st === S.CHARGE || spd > 2.2) return [c.run, Math.max(0.7, spd / c.runV), false];
+        return [c.walk, Math.max(0.5, spd / c.walkV), false];
+    }
   }
 
-  _put(mesh, idx, x, y, z, rx, ry, rz, s = 1, sy = s, sz = s) {
-    this.e.set(rx, ry, rz, 'YXZ');
-    this.q.setFromEuler(this.e);
-    this.loc.compose(this.v.set(x, y, z), this.q, this.sc.set(s, sy, sz));
-    this.m.multiplyMatrices(this.root, this.loc);
-    mesh.setMatrixAt(idx, this.m);
-  }
-
-  update(now) {
+  update(now, cam) {
     const P = this.pool;
-    let k = 0, x = 0;
-    const ex = (px, py, pz, rx, ry, rz, w, h, d, col) => {
-      this._put(this.extra, x, px, py, pz, rx, ry, rz, w, h, d);
-      this.extra.setColorAt(x++, col);
-    };
+    const dt = this.last ? Math.min(0.1, now - this.last) : 0;
+    this.last = now;
+    const cx = cam.position.x, cz = cam.position.z;
+    const fx = -Math.sin(cam.rotation.y), fz = -Math.cos(cam.rotation.y);
+    let live = 0;
     for (let i = 0; i < P.n; i++) {
       const st = P.state[i];
-      if (st === S.FREE) continue;
-      const T = ZTYPES[P.type[i]];
-      const seed = P.seed[i];
-      const walk = P.walk[i];
-      let fall = 0, sink = 0;
-      if (st === S.DYING) {
-        const t = P.t[i];
-        fall = Math.min(1, t / 0.55);
-        sink = Math.max(0, t - 0.9) * 1.2;
+      let z = this.slots[i];
+      if (st === S.FREE) { if (z) { this._release(z); this.slots[i] = null; } continue; }
+      const T = ZTYPES[P.type[i]], look = ZLOOK[T.id];
+      if (z && (z.seed !== P.seed[i] || z.type !== P.type[i])) { this._release(z); z = null; }
+      if (!z) {
+        z = this.slots[i] = this._take(look[0]);
+        z.seed = P.seed[i]; z.type = P.type[i];
+        this._dress(z, T, look);
+        z.acc = 1; // pose on the first frame
       }
-      this.e.set(-fall * (T.crawl ? 0.2 : 1.45), P.yaw[i], 0, 'YXZ');
-      this.q.setFromEuler(this.e);
-      const s = T.size * (0.94 + (seed % 13) / 100);
-      this.root.compose(this.v.set(P.x[i], P.y[i] - sink, P.z[i]), this.q, this.sc.set(s, s, s));
-      const moving = st === S.CHASE || st === S.CHARGE ? 1 : 0.2;
-      const swing = Math.sin(walk) * 0.55 * moving;
-      const bob = Math.abs(Math.cos(walk)) * 0.05 * moving;
-      const fl = P.flinch[i];
-      const sway = Math.sin(now * 1.7 + seed) * 0.08;
-      const look = this.look[T.id] || [];
-      const hot = 1 + fl * 0.8 + (P.burnT[i] > 0 ? 0.6 + Math.sin(now * 30 + i) * 0.3 : 0);
-      const headGone = st === S.DYING && P.headKill[i];
-      if (T.crawl) {
-        // Belly on the floor, head first, hauling itself on its arms with the
-        // legs dragging behind (local +z is the way it's facing).
-        this._put(this.torso, k, 0, 0.22, -0.3, 1.45, 0, sway * 0.5);
-        this._put(this.head, k, 0, 0.26, 0.36, -0.4 + sway, sway * 2, 0, headGone ? 0.001 : 1);
-        this._put(this.leg, k * 2, -0.11, 0.2, -0.3, 1.5 + swing * 0.2, 0, 0.1);
-        this._put(this.leg, k * 2 + 1, 0.11, 0.2, -0.3, 1.5 - swing * 0.2, 0, -0.1);
-        this._put(this.arm, k * 2, -0.25, 0.3, 0.25, -1.5 + Math.sin(walk) * 0.6, 0, 0.2);
-        this._put(this.arm, k * 2 + 1, 0.25, 0.3, 0.25, -1.5 - Math.sin(walk) * 0.6, 0, -0.2);
-        if (!headGone) { ex(-0.07, 0.5, 0.66, 0, 0, 0, 0.05, 0.03, 0.02, this.eyeC); ex(0.07, 0.5, 0.66, 0, 0, 0, 0.05, 0.03, 0.02, this.eyeC); }
-      } else {
-        const lean = T.id === 'brute' || T.id === 'warden' ? 0.3 : 0.18;
-        this._put(this.leg, k * 2, -0.11, 0.8 + bob, 0, swing, 0, 0);
-        this._put(this.leg, k * 2 + 1, 0.11, 0.8 + bob, 0, -swing, 0, 0);
-        const bloat = T.id === 'exploder' ? 1.35 : 1;
-        this._put(this.torso, k, 0, 0.8 + bob, 0, lean - fl * 0.35, 0, sway * 0.6, bloat, 1, bloat);
-        let armX = -1.3 + Math.sin(walk * 0.5 + seed) * 0.12;
-        if (st === S.ATTACK) armX = -2.1 + Math.min(1, P.t[i] / 0.42) * 1.9;
-        if (st === S.BREACH) armX = -1.5 + Math.sin(P.t[i] * 9) * 0.5;
-        if (st === S.SLAM) armX = -3.0 + Math.min(1, P.t[i] / 0.9) * 2.6;
-        if (st === S.SCREAM) armX = -2.6;
-        if (st === S.SPIT) armX = -0.4;
-        if (T.id === 'screamer' && st === S.CHASE) armX = -0.3;
-        this._put(this.arm, k * 2, -0.3 * bloat, 1.38 + bob, 0.04, armX + swing * 0.3, 0, 0.1);
-        this._put(this.arm, k * 2 + 1, 0.3 * bloat, 1.38 + bob, 0.04, armX - swing * 0.3, 0, -0.1);
-        const headTilt = st === S.SCREAM || st === S.SPIT ? -0.5 : 0.15 + sway;
-        this._put(this.head, k, 0, 1.42 + bob, 0.02, headTilt, sway * 2, sway, headGone ? 0.001 : 1);
-        // Eyes, then type extras, in the same root space.
-        if (!headGone && st !== S.DYING) {
-          ex(-0.07, 1.62 + bob, 0.18, 0, 0, 0, 0.05, 0.03, 0.02, this.eyeC);
-          ex(0.07, 1.62 + bob, 0.18, 0, 0, 0, 0.05, 0.03, 0.02, this.eyeC);
-        }
-        if (P.helmet[i] > 0) ex(0, 1.72 + bob, 0.02, 0.15, 0, 0, 0.34, 0.12, 0.34, this.helmetC);
-        if (P.vest[i] > 0) ex(0, 0.95 + bob, 0.0, lean, 0, 0, 0.52, 0.42, 0.33, this.plateC);
-        if (T.id === 'spitter') ex(0, 1.15 + bob, 0.2, lean, 0, 0, 0.3, 0.32, 0.18, this.sacC);
-        if (T.id === 'warden') {
-          ex(-0.12, 1.78 + bob, 0, 0, 0, 0.5, 0.06, 0.18, 0.06, this.hornC);
-          ex(0.12, 1.78 + bob, 0, 0, 0, -0.5, 0.06, 0.18, 0.06, this.hornC);
-        }
-        if (st === S.FUSE) ex(0, 1.0, 0, 0, now * 6, 0, 0.62 + Math.sin(now * 40) * 0.06, 0.6, 0.45, this.fuseC);
+      live++;
+      let sink = 0;
+      if (st === S.DYING) sink = Math.max(0, P.t[i] - 1.0) * 1.2;
+      z.root.position.set(P.x[i], P.y[i] - sink, P.z[i]);
+      z.root.rotation.y = P.yaw[i];
+      z.root.visible = true;
+      const [clip, rate, once] = this._clip(z, T, st, i);
+      this._play(z, clip, rate * (P.buff?.[i] > 0 ? 1.3 : 1), once);
+      // Animation rate by distance; behind the camera, barely.
+      const dx = P.x[i] - cx, dz = P.z[i] - cz, d = Math.hypot(dx, dz);
+      const behind = d > 4 && (dx * fx + dz * fz) < -0.2 * d;
+      const every = behind ? 0.25 : d < 15 ? 0 : d < 35 ? 1 / 20 : 1 / 8;
+      z.acc += dt;
+      if (z.acc >= every) {
+        z.mixer.update(z.acc);
+        z.acc = 0;
+        const fl = P.flinch[i];
+        if (fl > 0 && z.spine) z.spine.rotation.x -= fl * 0.45;
+        if (st === S.DYING && P.headKill[i] && z.head) z.head.scale.setScalar(0.001);
       }
-      // Colours: per-zombie skin / shirt / trousers, flashing on hits.
-      this.col.copy(look[0] || this.skins[seed % 5]).multiplyScalar(hot);
-      this.head.setColorAt(k, this.col);
-      this.arm.setColorAt(k * 2, this.col); this.arm.setColorAt(k * 2 + 1, this.col);
-      this.col.copy(look[1] || this.cloth[(seed >>> 3) % 6]).multiplyScalar(hot);
-      this.torso.setColorAt(k, this.col);
-      this.col.copy(this.pants[(seed >>> 6) % 3]);
-      this.leg.setColorAt(k * 2, this.col); this.leg.setColorAt(k * 2 + 1, this.col);
-      k++;
+      // Flash on hits, flicker while burning, pulse before an exploder pops.
+      const m = z.mat;
+      m.emissive.setRGB(0, 0, 0);
+      if (P.flinch[i] > 0) m.emissive.copy(HIT).multiplyScalar(P.flinch[i]);
+      if (P.burnT[i] > 0) m.emissive.copy(BURN).multiplyScalar(0.5 + Math.sin(now * 30 + i) * 0.25);
+      if (st === S.FUSE) {
+        m.emissive.copy(FUSE).multiplyScalar(0.4 + Math.sin(now * 40) * 0.3);
+        z.inner.scale.x = z.inner.scale.z = z.inner.scale.y * (1.25 + Math.sin(now * 40) * 0.06);
+      }
     }
-    for (const m of [this.torso, this.head]) { m.count = k; }
-    for (const m of [this.arm, this.leg]) { m.count = k * 2; }
-    this.extra.count = x;
-    for (const m of [this.torso, this.head, this.arm, this.leg, this.extra]) {
-      if (!m.count) continue;
-      m.instanceMatrix.needsUpdate = true;
-      if (m.instanceColor) m.instanceColor.needsUpdate = true;
-    }
-    return k;
+    return live;
+  }
+  dispose() {
+    for (const z of [...this.slots, ...this.free.zombie, ...this.free.brute]) if (z) { z.mixer.stopAllAction(); this.scene.remove(z.root); z.mat.dispose(); }
   }
 }
 
 // ------------------------------------------------------------------ crew
-// Your co-op teammates: same box-body language as the zombies, but upright,
-// in seat-coloured jackets and caps, gun up at their aim; lying down when
-// they're down. Six draw calls for up to four survivors.
-const CREW_JACKET = [0x3a6ea8, 0xc0702a, 0x4a8a3a, 0x8a4aa8];
+// Your co-op teammates: Matt, Lis, Sam or Shaun by seat, carrying the gun
+// they actually have out, walking/running/crouching from the snapshot,
+// lying down when they're down.
+const CREW = ['matt', 'lis', 'sam', 'shaun'];
 class Crew {
-  constructor(scene) {
-    const mat = new THREE.MeshBasicMaterial({ vertexColors: true });
-    const mk = (geo, n) => { const m = new THREE.InstancedMesh(geo, mat, n); m.count = 0; m.frustumCulled = false; m.setColorAt(0, new THREE.Color()); scene.add(m); return m; };
-    this.torso = mk(partGeo(0.46, 0.62, 0.27, false), 4);
-    this.head = mk(partGeo(0.28, 0.3, 0.28, false), 4);
-    this.cap = mk(partGeo(0.32, 0.08, 0.34, false), 4);
-    this.arm = mk(partGeo(0.12, 0.62, 0.12, true), 8);
-    this.leg = mk(partGeo(0.16, 0.8, 0.17, true), 8);
-    this.gun = mk(partGeo(0.08, 0.1, 0.6, false), 4);
-    this.parts = [this.torso, this.head, this.cap, this.arm, this.leg, this.gun];
-    this.m = new THREE.Matrix4(); this.root = new THREE.Matrix4(); this.loc = new THREE.Matrix4();
-    this.q = new THREE.Quaternion(); this.e = new THREE.Euler(); this.v = new THREE.Vector3(); this.sc = new THREE.Vector3();
-    this.c = new THREE.Color();
-    this.jackets = CREW_JACKET.map(lin);
-    this.skin = lin(0xd8a888); this.pants = lin(0x2a2c34); this.dark = lin(0x1c1d22);
+  constructor(scene) { this.scene = scene; this.bodies = {}; this.last = 0; }
+  _make(seat) {
+    const name = CREW[seat % 4], A = assets.chars[name];
+    const body = cloneSkinned(A.scene);
+    const root = new THREE.Group();
+    const s = 1.8 / A.height;
+    body.scale.setScalar(s);
+    body.position.y = -A.minY * s;
+    root.add(body);
+    const b = { name, root, body, mixer: new THREE.AnimationMixer(body), actions: {}, cur: null, gunId: null };
+    body.traverse(o => {
+      if (o.isSkinnedMesh) o.frustumCulled = false;
+      if (o.isBone && o.name === 'Middle1L') b.hand = o; // glTF loader strips the '.'
+      if (o.isBone && o.name === 'Torso') b.spine = o;
+    });
+    this.scene.add(root);
+    return b;
   }
-  _put(mesh, idx, x, y, z, rx, ry, rz, s = 1) {
-    this.e.set(rx, ry, rz, 'YXZ'); this.q.setFromEuler(this.e);
-    this.loc.compose(this.v.set(x, y, z), this.q, this.sc.set(s, s, s));
-    this.m.multiplyMatrices(this.root, this.loc);
-    mesh.setMatrixAt(idx, this.m);
+  _play(b, name, once) {
+    const a = b.actions[name] || (b.actions[name] = b.mixer.clipAction(assets.chars[b.name].clips[name]));
+    if (b.cur === a) return;
+    a.reset(); a.setLoop(once ? THREE.LoopOnce : THREE.LoopRepeat, Infinity); a.clampWhenFinished = once; a.play();
+    if (b.cur) a.crossFadeFrom(b.cur, 0.2, false);
+    b.cur = a;
   }
-  update(players, skip) {
-    let k = 0;
+  // The gun they have out, held at the kit's weapon hand (the left
+  // middle finger) and pointed where they're actually aiming.
+  _gun(b, w, P) {
+    const id = w?.id || null;
+    if (b.gunId !== id) {
+      b.gunId = id;
+      if (b.gun) { this.scene.remove(b.gun); b.gun.traverse(o => { o.geometry?.dispose(); o.material?.dispose(); }); b.gun = null; }
+      if (id && b.hand) { b.gun = gunModel(w); this.scene.add(b.gun); }
+    }
+    if (!b.gun) return;
+    b.hand.getWorldPosition(b.gun.position);
+    b.gun.rotation.set(P.pitch || 0, P.yaw, 0, 'YXZ');
+  }
+  update(players, skip, now) {
+    const dt = this.last ? Math.min(0.1, now - this.last) : 0;
+    this.last = now;
+    const seen = new Set();
     for (const P of players || []) {
       if (!P || P.seat === skip) continue;
-      // Body faces where they look (yaw 0 = -z; the body's forward is +z).
-      this.e.set(P.down ? -1.45 : 0, P.yaw + Math.PI, 0, 'YXZ'); this.q.setFromEuler(this.e);
-      const crouch = P.crouched && !P.down ? 0.35 : 0;
-      this.root.compose(this.v.set(P.x, P.y + (P.down ? 0.25 : 0) - crouch, P.z), this.q, this.sc.set(1, 1, 1));
-      const sw = Math.sin(P.stepPhase || 0) * 0.6 * (P.speedFrac || 0) * 1.6;
-      this._put(this.leg, k * 2, -0.11, 0.8, 0, sw, 0, 0);
-      this._put(this.leg, k * 2 + 1, 0.11, 0.8, 0, -sw, 0, 0);
-      this._put(this.torso, k, 0, 0.8, 0, 0.05, 0, 0);
-      const aim = -1.5 - (P.pitch || 0);
-      this._put(this.arm, k * 2, -0.27, 1.38, 0.02, aim, 0, 0.25);
-      this._put(this.arm, k * 2 + 1, 0.27, 1.38, 0.02, aim, 0, -0.25);
-      this._put(this.head, k, 0, 1.42, 0, -(P.pitch || 0) * 0.6, 0, 0);
-      this._put(this.cap, k, 0, 1.73, 0.04, -(P.pitch || 0) * 0.6, 0, 0);
-      this._put(this.gun, k, 0, 1.3 + Math.sin(P.pitch || 0) * 0.3, 0.45, -(P.pitch || 0), 0, 0);
-      const jacket = this.jackets[P.seat % 4];
-      this.torso.setColorAt(k, jacket); this.cap.setColorAt(k, jacket);
-      this.head.setColorAt(k, this.skin);
-      this.arm.setColorAt(k * 2, jacket); this.arm.setColorAt(k * 2 + 1, jacket);
-      this.leg.setColorAt(k * 2, this.pants); this.leg.setColorAt(k * 2 + 1, this.pants);
-      this.gun.setColorAt(k, this.dark);
-      k++;
+      seen.add(P.seat);
+      const b = this.bodies[P.seat] || (this.bodies[P.seat] = this._make(P.seat));
+      b.root.visible = true;
+      b.root.position.set(P.x, P.y, P.z);
+      b.root.rotation.y = P.yaw + Math.PI; // yaw 0 looks down -z; the model faces +z
+      const sf = P.speedFrac || 0;
+      if (P.down) this._play(b, 'Death', true);
+      else if (P.crouched) this._play(b, 'Duck', true);
+      else this._play(b, sf > 0.62 ? 'Run_Gun' : sf > 0.08 ? 'Walk_Gun' : 'Idle_Gun', false);
+      if (b.cur && b.cur.getClip().name.endsWith('Gun')) b.cur.timeScale = Math.max(0.6, sf * 1.6);
+      b.mixer.update(dt);
+      if (b.spine && !P.down) b.spine.rotation.x += (P.pitch || 0) * 0.5 + (P.kick || 0) * 0.15;
+      this._gun(b, P.down ? null : P.weapons?.[P.cur], P);
     }
-    for (const m of this.parts) {
-      m.count = (m === this.arm || m === this.leg) ? k * 2 : k;
-      if (k) { m.instanceMatrix.needsUpdate = true; m.instanceColor.needsUpdate = true; }
-    }
+    for (const seat of Object.keys(this.bodies)) if (!seen.has(+seat)) { const b = this.bodies[seat]; b.root.visible = false; if (b.gun) b.gun.visible = false; }
+    for (const P of players || []) if (P && this.bodies[P.seat]?.gun) this.bodies[P.seat].gun.visible = P.seat !== skip;
   }
-  dispose(scene) { for (const m of this.parts) { scene.remove(m); m.geometry.dispose(); } }
+  dispose() { for (const b of Object.values(this.bodies)) { b.mixer.stopAllAction(); this.scene.remove(b.root); if (b.gun) this.scene.remove(b.gun); } }
 }
 
 // ---------------------------------------------------------------- boards
 class Boards {
   constructor(scene, world) {
     this.world = world;
-    const g = partGeo(1.0, 0.17, 0.06, false);
+    const g = partGeo(1.0, 0.17, 0.06, false, L.planks);
     g.translate(0, -0.085, 0);
-    this.mesh = new THREE.InstancedMesh(g, new THREE.MeshBasicMaterial({ vertexColors: true }), world.windows.length * MAX_BOARDS);
+    this.mesh = new THREE.InstancedMesh(g, worldMat(), world.windows.length * MAX_BOARDS);
     this.mesh.frustumCulled = false;
     this.mesh.setColorAt(0, new THREE.Color());
     scene.add(this.mesh);
@@ -266,7 +294,7 @@ class Boards {
         this.q.setFromEuler(this.e);
         this.m.compose(this.v.set(W.x + 0.5 + ox * 0.42, y, W.y + 0.5 + oz * 0.42), this.q, this.s.set(1.15, 1, 1));
         this.mesh.setMatrixAt(k, this.m);
-        this.mesh.setColorAt(k, this.c.copy(this.wood[b % 3]).multiplyScalar(0.55));
+        this.mesh.setColorAt(k, this.c.copy(this.wood[b % 3]).multiplyScalar(1.6));
         k++;
       }
     });
@@ -276,28 +304,35 @@ class Boards {
   }
 }
 
-// ---------------------------------------------------------- flashlight
-// One patch for every MeshBasicMaterial that should catch the torch: a
-// cone around the view axis that brightens what it falls on, fading with
-// distance. Uniforms are shared, so one value switches it everywhere.
-const FLASH = { value: 0 };
-function torchable(mat) {
+// ------------------------------------------------------- world material
+// Every static surface: baked light in the vertex colour × one layer of
+// the texture array (per-vertex `tuv` = u, v, layer; layer 0 is white),
+// plus the torch — a cone around the view axis that brightens what it
+// falls on — and a brief warm muzzle light around you when you fire.
+// Uniforms are shared, so one value switches every material at once.
+const FLASH = { value: 0 }, MUZZLE = { value: 0 }, ATLAS = { value: null };
+function worldMat(opts = {}) {
+  const mat = new THREE.MeshBasicMaterial({ vertexColors: true, ...opts });
   mat.onBeforeCompile = sh => {
     sh.uniforms.uFlash = FLASH;
+    sh.uniforms.uMuzzle = MUZZLE;
+    sh.uniforms.uAtlas = ATLAS;
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vTorch;')
-      .replace('#include <project_vertex>', '#include <project_vertex>\nvTorch = mvPosition.xyz;');
+      .replace('#include <common>', '#include <common>\nattribute vec3 tuv;\nvarying vec3 vTuv;\nvarying vec3 vTorch;')
+      .replace('#include <project_vertex>', '#include <project_vertex>\nvTorch = mvPosition.xyz;\nvTuv = tuv;');
     sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nuniform float uFlash;\nvarying vec3 vTorch;')
-      .replace('#include <fog_fragment>', `if (uFlash > 0.0) {
-          float d = length(vTorch);
+      .replace('#include <common>', '#include <common>\nuniform float uFlash;\nuniform float uMuzzle;\nuniform highp sampler2DArray uAtlas;\nvarying vec3 vTuv;\nvarying vec3 vTorch;')
+      .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= texture(uAtlas, vTuv).rgb;')
+      .replace('#include <fog_fragment>', `float d = length(vTorch);
+        if (uFlash > 0.0) {
           float cone = smoothstep(0.82, 0.97, -vTorch.z / max(d, 0.001));
           float att = clamp(1.0 - d / 24.0, 0.0, 1.0) * (0.35 + 0.65 * smoothstep(0.4, 2.8, d));
           gl_FragColor.rgb = gl_FragColor.rgb * (1.0 + uFlash * cone * att * 2.2) + uFlash * cone * att * 0.02;
         }
+        if (uMuzzle > 0.0) gl_FragColor.rgb *= 1.0 + uMuzzle * vec3(1.6, 1.25, 0.8) * clamp(1.0 - d / 9.0, 0.0, 1.0);
         #include <fog_fragment>`);
   };
-  mat.customProgramCacheKey = () => 'torch';
+  mat.customProgramCacheKey = () => 'world';
   return mat;
 }
 
@@ -313,8 +348,9 @@ class Streamer {
     this.worker = new Worker(new URL('./geo-worker.js', import.meta.url), { type: 'module' });
     this.worker.postMessage({ t: 'world', def: {
       name: def.name, w: def.w, h: def.h, cells: def.cells, surf: def.surf, paint: def.paint,
-      lamps: def.lamps, spawns: [], starts: def.starts, containers: [], pois: {}, zones: [], beds: [], regions: [],
-    } });
+      lamps: def.lamps, spawns: [], starts: def.starts, containers: def.containers, pois: {}, zones: [], beds: [], regions: [],
+      roofs: def.roofs || [], home: def.home,
+    }, props: assets.props });
     this.worker.onmessage = ({ data: m }) => {
       if (m.t !== 'chunk') return;
       this.pending--;
@@ -323,6 +359,7 @@ class Streamer {
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.BufferAttribute(m.pos, 3));
       g.setAttribute('color', new THREE.BufferAttribute(m.col, 3));
+      g.setAttribute('tuv', new THREE.BufferAttribute(m.tuv, 3));
       g.computeBoundingSphere();
       const mesh = new THREE.Mesh(g, view.staticMat);
       mesh.matrixAutoUpdate = false;
@@ -365,12 +402,28 @@ class Streamer {
 
 // ------------------------------------------------------------- renderer
 const NIGHT_SKY = lin(0x0a0f1e), DAY_SKY = lin(0x8fa6bf), DUSK_SKY = lin(0x6a4a5a);
+const NIGHT_TOP = lin(0x02040c), DAY_TOP = lin(0x3a6aa8), DUSK_TOP = lin(0x2a2448);
+
+// A soft round glow (moon halo, lamp heads), drawn once.
+function glowTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const r = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  r.addColorStop(0, 'rgba(255,255,255,1)'); r.addColorStop(0.25, 'rgba(255,255,255,.45)'); r.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = r; g.fillRect(0, 0, 64, 64);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
 
 export class View {
   constructor(holder) {
     this.canvas = document.createElement('canvas');
     this.canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block;image-rendering:auto';
     holder.appendChild(this.canvas);
+    // Vignette: a CSS gradient over the canvas — costs the GPU nothing.
+    holder.appendChild(Object.assign(document.createElement('div'), {
+      style: 'position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse at center,transparent 55%,rgba(0,0,0,.55) 100%)',
+    }));
     this.renderer = new THREE.WebGLRenderer({
       canvas: this.canvas, antialias: false, powerPreference: 'high-performance', stencil: false,
     });
@@ -381,11 +434,24 @@ export class View {
     const dbg = gl.getExtension('WEBGL_debug_renderer_info');
     this.gpu = String(dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
 
+    ATLAS.value = assets.texArray;
     this.scene = new THREE.Scene();
     this.scene.background = NIGHT_SKY.clone();
     this.scene.fog = new THREE.Fog(NIGHT_SKY.clone(), 10, 44);
     this.camera = new THREE.PerspectiveCamera(62, 16 / 9, 0.05, 70);
-    this.staticMat = torchable(new THREE.MeshBasicMaterial({ vertexColors: true }));
+    this.scene.add(this.camera);
+    this.staticMat = worldMat();
+    this.glow = glowTexture();
+    // Only the characters are lit for real (Lambert); the world's light is
+    // baked. Moonlight, sky/ground fill, and the flashlight on the camera.
+    this.hemi = new THREE.HemisphereLight(0x8fa0d0, 0x2a2420, 1);
+    this.sun = new THREE.DirectionalLight(0xb8c8ff, 1);
+    this.sun.position.set(-0.45, 0.75, -0.5);
+    this.torch = new THREE.SpotLight(0xfff2d8, 0, 26, 0.42, 0.45, 1.2);
+    this.torch.position.set(0.15, -0.1, 0);
+    this.torch.target.position.set(0, 0, -1);
+    this.camera.add(this.torch, this.torch.target);
+    this.scene.add(this.hemi, this.sun);
     this._sky();
     // First-person weapon, drawn after a depth clear so it never clips.
     this.vmScene = new THREE.Scene();
@@ -395,17 +461,19 @@ export class View {
     this.setResolution(960, 540);
     this.statics = [];
     this.doors = {};
+    this.setDaylight(0);
   }
 
   // Show a world: the hand-built map is built whole; the open world streams.
-  setWorld(world, mapDef, pool) {
+  setWorld(world, mapDef, pool, zombieCap = 20) {
     for (const m of this.statics) { this.scene.remove(m); m.geometry.dispose(); }
     this.statics = [];
     for (const m of Object.values(this.doors)) { this.scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
     this.doors = {};
     this.streamer?.dispose(); this.streamer = null;
-    if (this.horde) for (const m of [this.horde.torso, this.horde.head, this.horde.arm, this.horde.leg, this.horde.extra]) { this.scene.remove(m); m.geometry.dispose(); }
+    this.horde?.dispose();
     if (this.boards) { this.scene.remove(this.boards.mesh); this.boards.mesh.geometry.dispose(); }
+    if (this.lampGlow) { this.scene.remove(this.lampGlow); this.lampGlow.geometry.dispose(); }
     this.world = world;
     if (world.openWorld) {
       this.streamer = new Streamer(this, world, mapDef);
@@ -415,6 +483,7 @@ export class View {
         const g = new THREE.BufferGeometry();
         g.setAttribute('position', new THREE.BufferAttribute(g0.pos, 3));
         g.setAttribute('color', new THREE.BufferAttribute(g0.col, 3));
+        g.setAttribute('tuv', new THREE.BufferAttribute(g0.tuv, 3));
         g.computeBoundingSphere();
         const m = new THREE.Mesh(g, this.staticMat);
         m.matrixAutoUpdate = false;
@@ -425,29 +494,54 @@ export class View {
       for (const d of Object.values(world.doors)) {
         const xs = d.cells.map(c => c[0]), zs = d.cells.map(c => c[1]);
         const x0 = Math.min(...xs), x1 = Math.max(...xs) + 1, z0 = Math.min(...zs), z1 = Math.max(...zs) + 1;
-        const g = partGeo(x1 - x0 - 0.04, CEIL - 0.02, z1 - z0 - 0.04, false);
-        const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, color: new THREE.Color(0x5a3c26).multiplyScalar(0.8) }));
+        const g = partGeo(x1 - x0 - 0.04, CEIL - 0.02, z1 - z0 - 0.04, false, L.planks);
+        const m = new THREE.Mesh(g, worldMat({ color: new THREE.Color(0x8a6a50).multiplyScalar(1.4) }));
         m.position.set((x0 + x1) / 2, 0, (z0 + z1) / 2);
         this.scene.add(m);
         this.doors[d.id] = m;
       }
     }
+    // Glowing heads on the outdoor lamp posts.
+    const heads = [];
+    for (const [x, z] of mapDef.lamps || []) if (world.cell(Math.floor(x), Math.floor(z)) === C.GROUND) heads.push(x, 4.35, z);
+    const lg = new THREE.BufferGeometry();
+    lg.setAttribute('position', new THREE.Float32BufferAttribute(heads, 3));
+    this.lampGlow = new THREE.Points(lg, new THREE.PointsMaterial({
+      map: this.glow, color: 0xffc070, size: 2.6, sizeAttenuation: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    }));
+    this.scene.add(this.lampGlow);
     this.camera.updateProjectionMatrix();
     this.horde = new Horde(this.scene, pool);
-    torchable(this.horde.torso.material);
-    this.crew?.dispose(this.scene);
+    this.horde.prewarm(zombieCap);
+    this.crew?.dispose();
     this.crew = new Crew(this.scene);
     this.crewPlayers = null; this.crewSkip = -1;
     this.boards = new Boards(this.scene, world);
+    // Compile every shader now rather than on the first zombie / teammate.
+    for (const z of this.horde.free.zombie.slice(-1).concat(this.horde.free.brute.slice(-1))) z.root.visible = true;
+    this.renderer.compile(this.scene, this.camera);
+    for (const z of [...this.horde.free.zombie, ...this.horde.free.brute]) z.root.visible = false;
   }
 
   _sky() {
-    // Moon (or sun) disc + a scatter of stars; both ignore fog.
-    this.moon = new THREE.Mesh(new THREE.CircleGeometry(3.2, 20),
-      new THREE.MeshBasicMaterial({ color: lin(0xf3ead0), fog: false }));
-    this.moon.position.set(-38, 34, -50);
-    this.moon.lookAt(0, 0, 0);
-    this.scene.add(this.moon);
+    // Gradient dome (zenith → horizon, matching the fog), the moon with a
+    // halo, stars, and a ring of distant treeline so the horizon isn't a
+    // flat wall of fog. None of it takes fog; it all follows the camera.
+    this.skyU = { top: { value: NIGHT_TOP.clone() }, hor: { value: NIGHT_SKY.clone() } };
+    this.sky = new THREE.Mesh(new THREE.SphereGeometry(75, 20, 10), new THREE.ShaderMaterial({
+      uniforms: this.skyU, side: THREE.BackSide, depthWrite: false, fog: false,
+      vertexShader: 'varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+      fragmentShader: `uniform vec3 top; uniform vec3 hor; varying vec3 vP;
+        void main(){ float h = normalize(vP).y; gl_FragColor = vec4(mix(hor, top, pow(clamp(h, 0.0, 1.0), 0.55)), 1.0);
+        #include <colorspace_fragment>
+        }`,
+    }));
+    this.sky.renderOrder = -2;
+    this.scene.add(this.sky);
+    this.moon = new THREE.Mesh(new THREE.CircleGeometry(3.2, 20), new THREE.MeshBasicMaterial({ color: lin(0xf3ead0), fog: false }));
+    this.halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glow, color: 0x8090c0, fog: false, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+    this.halo.scale.setScalar(22);
+    this.scene.add(this.moon, this.halo);
     const pts = [];
     for (let i = 0; i < 260; i++) {
       const a = hash(i, 1) * Math.PI * 2, e = 0.15 + hash(i, 2) * 1.2;
@@ -456,25 +550,47 @@ export class View {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
     this.stars = new THREE.Points(g, new THREE.PointsMaterial({ color: 0xbfc8ff, size: 1.5, sizeAttenuation: false, fog: false }));
+    this.stars.renderOrder = -1;
     this.scene.add(this.stars);
+    // Treeline: a jagged band of pine tops at 68 m.
+    const tp = [], N = 140;
+    for (let i = 0; i < N; i++) {
+      const a0 = i / N * Math.PI * 2, a1 = (i + 1) / N * Math.PI * 2, am = (a0 + a1) / 2;
+      const h = 6 + hash(i, 3) * 7, r = 68;
+      tp.push(Math.cos(a0) * r, -2, Math.sin(a0) * r, Math.cos(a1) * r, -2, Math.sin(a1) * r, Math.cos(am) * r, h, Math.sin(am) * r);
+    }
+    const tg = new THREE.BufferGeometry();
+    tg.setAttribute('position', new THREE.Float32BufferAttribute(tp, 3));
+    this.treeline = new THREE.Mesh(tg, new THREE.MeshBasicMaterial({ color: 0x000000, fog: false, side: THREE.DoubleSide }));
+    this.treeline.renderOrder = -1;
+    this.scene.add(this.treeline);
   }
 
   // 0 = midnight, 1 = noon. Tints every baked surface (they're lit for
-  // night), and moves fog, sky, stars and the moon/sun.
+  // night), relights the characters, and moves fog, sky, stars and moon.
   setDaylight(k, dusk = 0) {
     k = Math.max(0, Math.min(1, k));
     const tint = 1 + k * 1.55;
     this.staticMat.color.setRGB(tint, tint * 0.98, tint * (0.95 + 0.05 * (1 - k)));
-    this.horde?.torso.material.color.setScalar(0.65 + 0.5 * k);
     const sky = this.scene.background;
     sky.copy(NIGHT_SKY).lerp(DAY_SKY, k).lerp(DUSK_SKY, dusk * 0.6);
     this.scene.fog.color.copy(sky);
+    this.skyU.hor.value.copy(sky);
+    this.skyU.top.value.copy(NIGHT_TOP).lerp(DAY_TOP, k).lerp(DUSK_TOP, dusk * 0.6);
+    this.treeline.material.color.copy(sky).multiplyScalar(0.45);
     this.scene.fog.near = 10 + k * 15;
     this.stars.visible = k < 0.3;
+    this.halo.visible = k < 0.4;
     this.moon.material.color.set(k > 0.5 ? 0xfff6d0 : 0xf3ead0);
+    this.hemi.intensity = 0.9 + k * 1.6;
+    this.hemi.color.setRGB(0.55 + k * 0.45, 0.62 + k * 0.38, 0.85 + k * 0.15);
+    this.sun.intensity = 0.7 + k * 2.2;
+    this.sun.color.setRGB(0.7 + k * 0.3, 0.78 + k * 0.2, 1.0 - k * 0.1);
+    if (this.lampGlow) this.lampGlow.visible = k < 0.45;
   }
 
-  setFlashlight(on) { FLASH.value = on ? 1 : 0; }
+  setFlashlight(on) { FLASH.value = on ? 1 : 0; this.torch.intensity = on ? 22 : 0; }
+  muzzle(k) { MUZZLE.value = k; }
 
   // Internal render size; CSS stretches the canvas over the screen.
   setResolution(w, h) {
@@ -498,16 +614,21 @@ export class View {
   setEye(x, y, z, yaw, pitch, roll = 0) {
     this.camera.position.set(x, y, z);
     this.camera.rotation.set(pitch, yaw, roll, 'YXZ');
+    this.sky.position.set(x, y, z);
     this.stars.position.set(x, 0, z);
+    this.treeline.position.set(x, 0, z);
     this.moon.position.set(x - 38, 34, z - 50);
+    this.moon.lookAt(x, y, z);
+    this.halo.position.copy(this.moon.position);
   }
 
   render(now) {
     this.streamer?.update(this.camera.position.x, this.camera.position.z);
-    const live = this.horde.update(now);
-    this.crew.update(this.crewPlayers, this.crewSkip);
+    const live = this.horde.update(now, this.camera);
+    this.crew.update(this.crewPlayers, this.crewSkip, now);
     this.boards.update();
     for (const [id, m] of Object.entries(this.doors)) m.visible = !this.world.doors[id].open;
+    MUZZLE.value *= 0.55;
     const r = this.renderer;
     r.info.reset();
     r.clear();
@@ -521,8 +642,10 @@ export class View {
 
   dispose() {
     this.streamer?.dispose();
+    this.horde?.dispose();
+    this.crew?.dispose();
     this.renderer.dispose();
-    this.scene.traverse(o => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
+    this.scene.traverse(o => { o.geometry?.dispose?.(); if (o.material && !o.isSkinnedMesh) o.material.dispose?.(); });
     this.vmScene.traverse(o => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
     this.renderer.forceContextLoss?.();
     this.canvas.remove();

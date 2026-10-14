@@ -69,7 +69,7 @@ setTimeout(() => { console.error('✗ smoke timed out'); done(1); }, (SECS + 60)
   await cdp('Page.enable');
   await sleep(2500);
   const scene = process.env.SCENE ? `&scene=${process.env.SCENE}` : '';
-  const r = await fetch(`${BASE}/api/bench?secs=${SECS}&zombies=40${scene}`, { method: 'POST' });
+  const r = await fetch(`${BASE}/api/bench?secs=${SECS}${scene}`, { method: 'POST' });
   const body = await r.json();
   if (!body.ok) { console.error('✗ bench refused:', body.err); return done(1); }
   console.log('✓ bench started');

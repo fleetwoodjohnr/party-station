@@ -37,9 +37,16 @@ export function saveProfile(key, data) {
 
 // ------------------------------------------------------------ frame stats
 // Frame deltas between rendered frames; percentiles for the beacon/bench.
+// Also where the time goes, for the beacon: raw rAF interval (the
+// compositor's pace), JS ms per rendered frame, and render -> next rAF.
 class FrameStats {
-  constructor() { this.win = []; this.run = []; this.started = performance.now(); }
+  constructor() { this.win = []; this.run = []; this.started = performance.now(); this.aux = { raf: [], cpu: [], cost: [] }; }
   push(ms) { this.win.push(ms); this.run.push(ms); }
+  note(k, ms) { const a = this.aux[k]; a.push(ms); if (a.length > 1200) a.splice(0, 600); }
+  auxMedians() {
+    const med = a => { const s = Float32Array.from(a.slice(-600)).sort(); return s.length ? s[s.length >> 1] : undefined; };
+    return { raf: med(this.aux.raf), cpu: med(this.aux.cpu), cost: med(this.aux.cost) };
+  }
   static pct(arr) {
     if (!arr.length) return {};
     const s = Float32Array.from(arr).sort();
@@ -126,7 +133,7 @@ class App {
     root.append(this.canvasLayer, this.uiLayer, this.perfEl);
     try {
       this.view = new View(this.canvasLayer);
-      this.view.setWorld(this.world, DINER, this.pool);
+      this.view.setWorld(this.world, DINER, this.pool, this.gov.maxCap);
     } catch (e) {
       console.error('Dead of Night: WebGL unavailable', e);
       mount(this.uiLayer, h('div', { class: 'nn-center' }, h('div', { class: 'nn-panel' },
@@ -192,7 +199,9 @@ class App {
     if (this.stopped) return;
     requestAnimationFrame(this.tick);
     // The first rAF after a render tells us how long that render really took.
-    if (this.justRendered) { this.gov.cost(now - this.lastRender); this.justRendered = false; }
+    if (this.lastRaf) this.stats.note('raf', now - this.lastRaf);
+    this.lastRaf = now;
+    if (this.justRendered) { this.gov.cost(now - this.lastRender); this.stats.note('cost', now - this.lastRender); this.justRendered = false; }
     if (!this.lastRender) this.lastRender = now - 33;
     const since = now - this.lastRender;
     if (this.gov.fps === 30 && since < 1000 / 30 - 5) return;
@@ -203,10 +212,12 @@ class App {
     this.gov.frame(since);
     if (this.gov.tick(now)) this.applyResolution();
 
+    const t0 = performance.now();
     this.input.poll(now);
     this.state.update(dt, now);
     const live = this.view.render(now / 1000);
     this.state.after?.(dt, now);
+    this.stats.note('cpu', performance.now() - t0);
 
     if (now - this.lastBeacon > 10000) { this.lastBeacon = now; this.beacon(false, live); }
     if (this.perfEl.style.display !== 'none' && (this._pf = (this._pf || 0) + 1) % 15 === 0) {
@@ -224,7 +235,7 @@ class App {
     const info = this.view.renderer.info.render;
     const body = {
       run: this.runId, scene, preset: this.gov.quality, gpu: this.view.gpu, final,
-      ...w, draws: info.calls, tris: info.triangles, zombies: live, cap: this.gov.cap,
+      ...w, ...this.stats.auxMedians(), draws: info.calls, tris: info.triangles, zombies: live, cap: this.gov.cap,
       scale: RES[this.gov.res][1],
       heapMB: performance.memory ? performance.memory.usedJSHeapSize / 1048576 : undefined,
     };
@@ -279,7 +290,7 @@ class TitleState {
       { label: 'Career', sub: 'Rank, unlocks and records', act: () => this.stack.push(careerScreen(a, this.stack, this.career)) },
       { label: 'Settings', act: () => this.stack.push(settingsScreen(a, this.stack)) },
       { label: 'Controls', act: () => this.stack.push(controlsScreen(a, this.stack)) },
-      { label: 'Run benchmark', sub: 'One-minute flythrough with 40 zombies — measures this TV', act: () => a.setState(new BenchState(a)) },
+      { label: 'Run benchmark', sub: 'One-minute flythrough with a full horde — measures this TV', act: () => a.setState(new BenchState(a)) },
       { label: 'Quit to Party Station', act: () => a.quit() },
     ], { onBack: () => a.quit() });
     this.draw();
@@ -343,7 +354,8 @@ class BenchState {
     this.app = app;
     this.scene = 'bench-diner';
     this.secs = Number(app.opts.secs) || 60;
-    this.n = Math.min(app.pool.n, Number(app.opts.zombies) || 40);
+    // As many zombies as the preset allows on screen in a real game.
+    this.n = Math.min(app.pool.n, Number(app.opts.zombies) || app.gov.maxCap);
     this.t = 0;
   }
   enter() {
@@ -396,6 +408,8 @@ class BenchState {
     a.perfEl.style.display = a.settings.showFps ? '' : 'none';
   }
 }
+
+export { loadAssets } from './assets.js';
 
 export function start(holder, ctx) {
   injectStyles();

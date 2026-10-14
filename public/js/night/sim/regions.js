@@ -53,6 +53,7 @@ export function generateWorld(seed = 1) {
   const def = {
     name: 'Hollis County', w: W, h: H, cells, surf, paint,
     starts: [], spawns: [], lamps: [], containers: [], pois: {}, zones: [], beds: [], regions: [],
+    roofs: [], // building footprints, for the renderer's roofs
   };
   const idx = (x, z) => z * W + x;
   const inb = (x, z) => x > 0 && z > 0 && x < W - 1 && z < H - 1;
@@ -90,6 +91,7 @@ export function generateWorld(seed = 1) {
       }
     }
     if (lamp) def.lamps.push([x0 + w / 2, z0 + h / 2]);
+    def.roofs.push([x0, z0, w, h, paintId]);
     // Containers hug inside walls, away from doors.
     const spots = [];
     for (let x = x0 + 1; x < x0 + w - 1; x++) { spots.push([x, z0 + 1]); spots.push([x, z0 + h - 2]); }

@@ -325,6 +325,16 @@ render it live. Revive a downed friend by holding **X** beside them (30 s
 before they bleed out). In Open World/Shelter the lobby option *Co-op
 supplies* chooses one shared pack or one each.
 
+**Art.** The characters, guns and props are free CC0 models by
+[Quaternius](https://quaternius.com) (the survivors Matt, Lis, Sam and Shaun
+are your co-op seats; the zombies, cars, trees, street lamps and furniture
+come from his packs via [Poly Pizza](https://poly.pizza)), and the ground and
+wall textures are CC0 photos from [Poly Haven](https://polyhaven.com) — see
+`public/night-assets/CREDITS.md`. First-person gloves and sleeves are the one
+thing drawn in code (no CC0 pack has FPS arms). All of it is about 3 MB,
+committed, and loads while the title appears; nothing is fetched from the
+internet.
+
 **Saves.** Settings, career rank/XP and records, and the world slots are
 stored by the station in `data/profiles/deadofnight/` (with a `.bak` of the
 previous copy), beside the card-game saves — they survive updates and
@@ -334,10 +344,14 @@ survivors are saved by name in the host's world.
 ### Performance on the Pi
 
 Built for a Pi 4 GPU rather than ported to it: all map lighting is baked
-into vertex colours (no runtime lights or shadows), zombies are one
-instanced mesh per body part (~5 draw calls for the whole horde), the shelter
-one per piece type, effects and props are pooled, the open world streams
-32 m chunks built in a Web Worker and drops far ones. The 3D view renders at
+into vertex colours (no shadows), and the walls and ground sample one
+texture array; props (trees, cars, lamp posts, furniture) are merged into
+that baked geometry, so they cost no draw calls. Only the characters are lit
+for real (Lambert: moon, sky and your flashlight): each zombie is one
+skinned ~2.3k-triangle mesh, animated every frame up close, less often far
+away and barely when behind you. The shelter is one mesh per piece type,
+effects are pooled, the open world streams 32 m chunks built in a Web Worker
+and drops far ones. The 3D view renders at
 640×360–1280×720 and is stretched to the screen (the HUD stays sharp), paced
 at 30 or 60 FPS; on *Auto* a governor lowers resolution and then the live
 zombie count when frames run late — a round keeps its zombies, they just
@@ -348,15 +362,21 @@ Measure a station from any machine on the network (the TV must be on the
 hub; it takes the screen for about a minute):
 
 ```bash
-curl -X POST 'http://party-station.local/api/bench'                  # flythrough, 40 zombies
+curl -X POST 'http://party-station.local/api/bench'                  # flythrough, as many zombies as the preset allows (20 on Balanced)
 curl -X POST 'http://party-station.local/api/bench?scene=classic'    # the real game on autopilot from round 10
 curl -s http://party-station.local/api/status | jq .perf              # FPS p50/p95, draw calls, RAM, swap, kiosk memory, SoC °C
 ```
 
+`raf`, `cpu` and `cost` in a beacon split a frame: the median time between
+the browser's animation frames (its compositor's pace), the game's own
+JavaScript per rendered frame, and render-to-next-frame (mostly GPU).
+
 | Where | Scene | FPS (avg) | p95 frame | Notes |
 |---|---|---|---|---|
-| Raspberry Pi 4 (2GB) | — | *not measured yet* | — | run the bench above and record it here |
-| Dev box, headless software GL | flythrough, 40 zombies | 26.8 | 50 ms | CPU rendering — only proves it runs |
+| Raspberry Pi 4 (2GB), V3D, Balanced | flythrough, 40 box zombies (before the CC0 art) | 27.1 | 43.1 ms | p50 36.7 ms; 1.3 GB free, no swap, kiosk 340 MB, 39 °C |
+| Raspberry Pi 4 (2GB), V3D, Balanced | Classic autopilot from round 10 (before the CC0 art) | 30.1 | 40.5 ms | p50 32.2 ms; 18 zombies; 1.26 GB free, no swap, kiosk 367 MB |
+| Raspberry Pi 4 (2GB) | either, with the CC0 art | *not measured yet* | — | run the bench above and record it here |
+| Dev box, headless software GL | flythrough, 20 CC0 zombies | 9.2 | 150 ms | CPU rendering of 30 draws / 63k triangles — only proves it runs |
 
 ## Deploying updates
 

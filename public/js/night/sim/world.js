@@ -32,7 +32,7 @@ export class World {
       this.containers = def.containers; this.pois = def.pois; this.zones = def.zones;
       this.beds = def.beds; this.regions = def.regions; this.home = def.home;
       this.wallbuys = []; this.machines = []; this.traps = [];
-      this.lamps = def.lamps;
+      this.lamps = def.lamps; this.roofs = def.roofs || [];
       this.version = 0;
       this.openWorld = true;
       return;

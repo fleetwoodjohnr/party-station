@@ -1,205 +1,260 @@
-// First-person weapons, hit effects and chalk signs. Viewmodels are built
-// from boxes per weapon model (no meshes to download); effects are pooled
-// instanced particles and tracers, so a firefight allocates nothing.
-import { THREE } from './render.js';
+// First-person weapons, hit effects and chalk signs. The guns are CC0
+// models (assets.js), each normalised once — muzzle down -z, a real-world
+// length, origin at the grip — and shaded with a matcap, so they read as
+// metal and wood without any lights. Gloves and sleeves are still built
+// here (no CC0 pack has first-person arms). Effects are pooled instanced
+// particles and tracers, so a firefight allocates nothing.
+import * as THREE from '/vendor/three/three.module.js';
 import { WEAPONS, MELEE, RARITY } from './sim/weapons.js';
+import { assets } from './assets.js';
 
 const lin = hex => new THREE.Color(hex);
 
-// A box with a baked top-light gradient, coloured once.
-export function block(w, h, d, hex, x, y, z, rx = 0) {
+// A box with a baked top-light gradient, coloured once (and textured with
+// one layer of the world's texture array when it's drawn with worldMat).
+export function block(w, h, d, hex, x, y, z, rx = 0, layer = 0) {
   const g = new THREE.BoxGeometry(w, h, d);
   const pos = g.getAttribute('position');
   const c = lin(hex);
-  const col = new Float32Array(pos.count * 3);
+  const col = new Float32Array(pos.count * 3), tuv = new Float32Array(pos.count * 3);
   for (let i = 0; i < pos.count; i++) {
     const k = 0.55 + 0.45 * ((pos.getY(i) / h) + 0.5);
     col[i * 3] = c.r * k; col[i * 3 + 1] = c.g * k; col[i * 3 + 2] = c.b * k;
   }
-  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  g.deleteAttribute('normal'); g.deleteAttribute('uv');
   g.rotateX(rx);
   g.translate(x, y, z);
+  for (let i = 0; i < pos.count; i++) { tuv[i * 3] = pos.getX(i) + pos.getZ(i); tuv[i * 3 + 1] = pos.getY(i); tuv[i * 3 + 2] = layer; }
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  g.setAttribute('tuv', new THREE.BufferAttribute(tuv, 3));
+  g.deleteAttribute('uv');
   return g;
 }
 
+// Merge geometries (all with position + colour; normals and tuv kept when
+// every part has them).
 export function merge(geos) {
-  let n = 0;
-  for (const g of geos) n += g.getAttribute('position').count;
-  const pos = new Float32Array(n * 3), col = new Float32Array(n * 3), idx = [];
-  let o = 0;
-  for (const g of geos) {
-    const p = g.getAttribute('position'), c = g.getAttribute('color');
-    pos.set(p.array, o * 3); col.set(c.array, o * 3);
-    for (const i of g.index.array) idx.push(i + o);
-    o += p.count;
-    g.dispose();
+  const names = ['position', 'color', 'normal', 'tuv'].filter(a => geos.every(g => g.getAttribute(a)));
+  const out = new THREE.BufferGeometry();
+  const flat = geos.map(g => (g.index ? g.toNonIndexed() : g));
+  for (const a of names) {
+    const n = flat.reduce((t, g) => t + g.getAttribute(a).count, 0);
+    const arr = new Float32Array(n * 3);
+    let o = 0;
+    for (const g of flat) { const at = g.getAttribute(a); for (let i = 0; i < at.count; i++) { arr[o++] = at.getX(i); arr[o++] = at.getY(i); arr[o++] = at.getZ(i); } }
+    out.setAttribute(a, new THREE.BufferAttribute(arr, 3));
   }
-  const m = new THREE.BufferGeometry();
-  m.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  m.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  m.setIndex(idx);
-  return m;
+  for (const g of new Set([...geos, ...flat])) g.dispose();
+  return out;
 }
 
-const METAL = 0x2b2e36, STEEL = 0x4c505c, WOOD = 0x6b4426, GRIP = 0x1c1d22, SKIN = 0xc79a7a, SLEEVE = 0x3a4436, GLOVE = 0x26282c;
+const STEEL = 0x4c505c, GRIP = 0x1c1d22, SLEEVE = 0x3a4436, GLOVE = 0x26282c;
 
-// Gun parts in metres, muzzle toward -z; returns { geo, muzzle: z of tip, sightY }.
-// Shared shapes: a receiver, barrel, magazine, grip and stock, sized per
-// gun. `optic` is where a sight sits (y of the rail, z along the gun).
-const rifle = ({ len = 0.34, bar = 0.18, barW = 0.022, mag = [0.03, 0.13, 0.05], magZ = -0.1, stock = 0.2, h = 0.07, wood = false }) => ({
-  parts: [
-    block(0.052, h, len, wood ? WOOD : METAL, 0, 0, -len / 2 + 0.08),
-    block(barW, barW, bar, STEEL, 0, 0.01, -len + 0.08 - bar / 2),
-    block(mag[0], mag[1], mag[2], GRIP, 0, -h / 2 - mag[1] / 2 + 0.01, magZ, -0.12),
-    block(0.03, 0.09, 0.04, GRIP, 0, -0.075, 0.03, 0.3),
-    block(0.034, 0.05, stock, wood ? WOOD : METAL, 0, -0.01, 0.08 + stock / 2),
-    block(0.012, 0.022, 0.012, METAL, 0, h / 2 + 0.011, -len + 0.12),
-    block(0.03, 0.016, 0.03, METAL, 0, h / 2 + 0.008, 0.02),
-  ],
-  muzzle: -len + 0.08 - bar, sightY: h / 2 + 0.02, rail: h / 2 + 0.005, hipX: 0.16, hipY: -0.17, z: -0.34, adsZ: -0.3,
-  magAt: [0, -h / 2 - mag[1] / 2 + 0.01, magZ], mag, fore: magZ - 0.1,
-});
-
-const MODELS = {
-  revolver: () => ({
-    parts: [
-      block(0.034, 0.034, 0.2, STEEL, 0, 0.02, -0.1),
-      block(0.05, 0.05, 0.06, METAL, 0, 0.01, -0.01),
-      block(0.03, 0.1, 0.045, WOOD, 0, -0.06, 0.04, 0.35),
-      block(0.008, 0.012, 0.01, METAL, 0, 0.043, -0.19),
-    ],
-    muzzle: -0.2, sightY: 0.05, hipX: 0.15, hipY: -0.15, z: -0.36, adsZ: -0.34,
-  }),
-  pdw: () => ({ ...rifle({ len: 0.26, bar: 0.08, mag: [0.028, 0.16, 0.04], magZ: 0.02, stock: 0.14 }), hipX: 0.15 }),
-  ar: () => rifle({ len: 0.4, bar: 0.22, mag: [0.032, 0.15, 0.055], magZ: -0.12, stock: 0.22 }),
-  br: () => ({ ...rifle({ len: 0.44, bar: 0.2, mag: [0.034, 0.12, 0.06], magZ: -0.14, stock: 0.24, h: 0.08 }) }),
-  autoshotgun: () => rifle({ len: 0.42, bar: 0.24, barW: 0.034, mag: [0.06, 0.12, 0.08], magZ: -0.12, stock: 0.22, h: 0.08 }),
-  sawnoff: () => ({
-    parts: [
-      block(0.07, 0.035, 0.32, STEEL, 0, 0.02, -0.14),
-      block(0.05, 0.05, 0.12, WOOD, 0, 0.0, 0.05),
-      block(0.035, 0.1, 0.05, WOOD, 0, -0.06, 0.12, 0.5),
-    ],
-    muzzle: -0.3, sightY: 0.045, hipX: 0.15, hipY: -0.16, z: -0.32, adsZ: -0.3,
-  }),
-  dmr: () => rifle({ len: 0.5, bar: 0.26, mag: [0.03, 0.09, 0.06], magZ: -0.16, stock: 0.26, wood: true }),
-  sniper: () => ({
-    ...rifle({ len: 0.55, bar: 0.36, mag: [0.03, 0.06, 0.06], magZ: -0.12, stock: 0.28, wood: true }),
-    scopeBuiltIn: true,
-  }),
-  lmg: () => ({
-    ...rifle({ len: 0.5, bar: 0.28, barW: 0.028, mag: [0.1, 0.1, 0.12], magZ: -0.08, stock: 0.24, h: 0.09 }),
-    hipX: 0.17, hipY: -0.19,
-  }),
-  launcher: () => ({
-    parts: [
-      block(0.085, 0.085, 0.42, 0x4a5236, 0, 0.0, -0.18),
-      block(0.06, 0.06, 0.12, METAL, 0, -0.01, 0.07),
-      block(0.03, 0.1, 0.045, GRIP, 0, -0.08, -0.02, 0.3),
-      block(0.034, 0.05, 0.2, METAL, 0, -0.01, 0.2),
-      block(0.03, 0.03, 0.03, 0xffa020, 0, 0.06, -0.32),
-    ],
-    muzzle: -0.39, sightY: 0.075, hipX: 0.16, hipY: -0.17, z: -0.34, adsZ: -0.32,
-  }),
-  pistol: () => ({
-    parts: [
-      block(0.036, 0.04, 0.2, STEEL, 0, 0.02, -0.06),
-      block(0.032, 0.03, 0.17, METAL, 0, -0.012, -0.05),
-      block(0.03, 0.1, 0.045, GRIP, 0, -0.065, 0.02, 0.25),
-      block(0.008, 0.01, 0.01, METAL, 0, 0.046, -0.15),
-      block(0.02, 0.01, 0.01, METAL, 0, 0.046, 0.025),
-    ],
-    muzzle: -0.17, sightY: 0.05, hipX: 0.15, hipY: -0.15, z: -0.36, adsZ: -0.34,
-  }),
-  smg: () => ({
-    parts: [
-      block(0.05, 0.065, 0.32, METAL, 0, 0, -0.08),
-      block(0.024, 0.024, 0.16, STEEL, 0, 0.008, -0.31),
-      block(0.03, 0.14, 0.045, GRIP, 0, -0.1, -0.12, -0.15),
-      block(0.03, 0.09, 0.04, GRIP, 0, -0.07, 0.02, 0.3),
-      block(0.03, 0.035, 0.2, METAL, 0, 0.005, 0.17),
-      block(0.012, 0.03, 0.012, METAL, 0, 0.045, -0.2),
-      block(0.03, 0.02, 0.03, METAL, 0, 0.045, 0.02),
-    ],
-    muzzle: -0.39, sightY: 0.058, hipX: 0.16, hipY: -0.17, z: -0.34, adsZ: -0.3,
-  }),
-  shotgun: () => ({
-    parts: [
-      block(0.034, 0.034, 0.62, STEEL, 0, 0.018, -0.28),
-      block(0.026, 0.026, 0.42, METAL, 0, -0.014, -0.22),
-      block(0.05, 0.05, 0.13, WOOD, 0, -0.012, -0.28),
-      block(0.046, 0.06, 0.17, METAL, 0, -0.008, 0.05),
-      block(0.04, 0.08, 0.26, WOOD, 0, -0.05, 0.24, 0.12),
-      block(0.008, 0.012, 0.01, 0xc8c8c0, 0, 0.04, -0.58),
-    ],
-    muzzle: -0.6, sightY: 0.05, hipX: 0.15, hipY: -0.17, z: -0.32, adsZ: -0.36,
-  }),
+// Weapon id -> [CC0 model, length in metres, grip position as a fraction
+// of the length from the back, colour tint, authored backwards]. The
+// models are authored muzzle toward +x, up +y (the launcher toward -x).
+const GUNS = {
+  pistol: ['pistol', 0.21, 0.28], revolver: ['revolver', 0.3, 0.25], smg: ['smg', 0.44, 0.5], pdw: ['pdw', 0.52, 0.45],
+  ar: ['ar', 0.88, 0.42], kestrel: ['ak', 0.88, 0.42], br: ['bullpup', 0.74, 0.62], shotgun: ['shotgun', 1.0, 0.3],
+  autoshotgun: ['shortstock', 0.86, 0.36], sawnoff: ['sawnoff', 0.62, 0.22], dmr: ['akwood', 0.98, 0.4],
+  sniper: ['sniper', 1.15, 0.36], lmg: ['ar', 1.0, 0.4, 0x8a9078], launcher: ['launcher', 0.56, 0.24, null, true],
 };
+const SHORT = new Set(['pistol', 'revolver']);
 
-function hands(model) {
-  const g = [];
-  // Right hand on the grip, sleeve trailing back out of view.
-  g.push(block(0.05, 0.06, 0.07, GLOVE, 0.005, -0.075, 0.03));
-  g.push(block(0.055, 0.055, 0.26, SLEEVE, 0.035, -0.115, 0.24, 0.3));
-  // Left hand on the fore-end (pistol: cupping the right).
-  const fz = model === 'pistol' ? 0.0 : model === 'smg' ? -0.2 : -0.28;
-  g.push(block(0.05, 0.05, 0.08, GLOVE, -0.022, -0.05, fz));
-  g.push(block(0.055, 0.055, 0.26, SLEEVE, -0.085, -0.12, fz + 0.2, 0.4));
+// One normalised geometry per CC0 model and length (cached): rotated so
+// the muzzle points down -z, scaled, origin at the grip; plus where its
+// top (the sight line), muzzle and fore-end are.
+const shapes = new Map();
+function shape(model, len, gripAt, flip) {
+  const key = `${model}|${len}|${gripAt}`;
+  if (shapes.has(key)) return shapes.get(key);
+  const src = assets.guns[model];
+  const g = src.clone();
+  g.rotateY(flip ? -Math.PI / 2 : Math.PI / 2); // muzzle -> -z
+  g.computeBoundingBox();
+  let b = g.boundingBox;
+  const k = len / (b.max.z - b.min.z);
+  g.scale(k, k, k);
+  g.computeBoundingBox(); b = g.boundingBox;
+  g.translate(-(b.min.x + b.max.x) / 2, -b.max.y + 0.05, -(b.max.z - len * gripAt));
+  g.computeBoundingBox(); b = g.boundingBox;
+  // The bore: mean height of what's at the very tip of the muzzle.
+  const P = g.getAttribute('position');
+  let by = 0, n = 0;
+  for (let i = 0; i < P.count; i++) if (P.getZ(i) < b.min.z + len * 0.02) { by += P.getY(i); n++; }
+  const s = { geo: g, top: b.max.y, bottom: b.min.y, muzzle: b.min.z, back: b.max.z, fore: b.min.z + len * 0.3, bore: n ? by / n : b.max.y - 0.03, halfW: (b.max.x - b.min.x) / 2 };
+  shapes.set(key, s);
+  return s;
+}
+// Attachments: a CC0 part (scope, bipod) placed on the gun, scaled to a
+// length along the barrel (or to a height).
+function part(model, len, x, y, z, byHeight = false) {
+  const g = assets.guns[model].clone();
+  g.rotateY(Math.PI / 2);
+  g.computeBoundingBox();
+  const b = g.boundingBox, k = len / (byHeight ? b.max.y - b.min.y : b.max.z - b.min.z);
+  g.scale(k, k, k);
+  g.computeBoundingBox();
+  const c = g.boundingBox;
+  g.translate(x - (c.min.x + c.max.x) / 2, y - c.min.y, z - (c.min.z + c.max.z) / 2);
+  return { geo: g, h: c.max.y - c.min.y };
+}
+// A plain cylinder along z (suppressors, compensators), with normals.
+function tube(r, len, hex, y, z) {
+  const g = new THREE.CylinderGeometry(r, r, len, 10).rotateX(Math.PI / 2).translate(0, y, z).toNonIndexed();
+  const c = lin(hex), n = g.getAttribute('position').count;
+  g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * 3).map((_, i) => [c.r, c.g, c.b][i % 3]), 3));
+  g.deleteAttribute('uv');
   return g;
 }
 
-// Attachments on the model: optic on the rail (and the sight line moves up
-// to it so ADS still lines up), muzzle devices, bigger mags, foregrips,
-// and a rarity stripe on the receiver.
-function fit(def, w) {
-  const extra = [];
+// The gun with its attachments, as one coloured geometry and a `def`
+// describing it for posing (hip and ADS positions, sight line, muzzle).
+function gunGeometry(w) {
+  const [model, len0, gripAt, tint, flip] = GUNS[w.id] || GUNS.ar;
   const att = w.att || {};
-  const top = def.rail ?? def.sightY - 0.015;
-  if (att.optic === 'reddot') { extra.push(block(0.03, 0.03, 0.05, METAL, 0, top + 0.015, -0.03)); def.sightY = top + 0.022; }
-  if (att.optic === 'holo') { extra.push(block(0.04, 0.035, 0.03, METAL, 0, top + 0.018, -0.05), block(0.006, 0.03, 0.006, METAL, 0.017, top + 0.04, -0.05), block(0.006, 0.03, 0.006, METAL, -0.017, top + 0.04, -0.05)); def.sightY = top + 0.032; }
-  if (att.optic === 'scope4' || def.scopeBuiltIn) { extra.push(block(0.036, 0.036, 0.24, 0x1d1f24, 0, top + 0.03, -0.05)); def.sightY = top + 0.03; def.scope = true; }
-  if (att.muzzle === 'suppressor') extra.push(block(0.034, 0.034, 0.16, 0x1d1f24, 0, (def.sightY - 0.03), def.muzzle - 0.08));
-  if (att.muzzle === 'compensator') extra.push(block(0.03, 0.03, 0.05, STEEL, 0, (def.sightY - 0.03), def.muzzle - 0.02));
-  if (att.muzzle === 'suppressor') def.muzzle -= 0.16;
-  if (att.mag === 'extmag' && def.magAt) extra.push(block(def.mag[0] * 1.05, def.mag[1] * 0.6, def.mag[2], GRIP, def.magAt[0], def.magAt[1] - def.mag[1] * 0.55, def.magAt[2]));
-  if ((att.grip === 'vgrip' || att.grip === 'agrip') && def.fore != null) extra.push(block(0.028, 0.08, 0.03, GRIP, 0, -0.07, def.fore, att.grip === 'agrip' ? -0.6 : 0));
-  if (w.tier) extra.push(block(0.054, 0.012, 0.12, new THREE.Color(RARITY[w.tier].color).getHex(), 0, 0.012, -0.04));
-  return extra;
+  const len = len0 * (att.barrel === 'longbarrel' ? 1.06 : att.barrel === 'shortbarrel' ? 0.94 : 1);
+  const S = shape(model, len, gripAt, flip);
+  const parts = [S.geo.clone()];
+  if (tint) {
+    const c = parts[0].getAttribute('color'), t = lin(tint);
+    for (let i = 0; i < c.count; i++) c.setXYZ(i, c.getX(i) * t.r * 1.4, c.getY(i) * t.g * 1.4, c.getZ(i) * t.b * 1.4);
+  }
+  const short = SHORT.has(w.id);
+  const def = {
+    sightY: S.top + 0.012, muzzle: S.muzzle, fore: S.fore, top: S.top, bore: S.bore,
+    hipX: short ? 0.14 : 0.165, hipY: short ? -0.14 : -0.15, z: short ? -0.38 : -0.4, adsZ: short ? -0.32 : -0.26,
+    scope: model === 'sniper', short,
+  };
+  // Optics sit on top, a little ahead of the grip; the sight line moves
+  // up to the optic's centre so aiming down sights still lines up.
+  const opt = att.optic;
+  if (opt) {
+    const L = opt === 'scope4' ? 0.26 : opt === 'holo' ? 0.12 : 0.09;
+    // Sunk a little into the gun so it sits on the rail over any iron sight.
+    const base = Math.max(S.bore + 0.03, S.top - 0.03);
+    const p = part('scope', L, 0, base, -0.06);
+    parts.push(p.geo);
+    def.sightY = base + p.h * 0.62;
+    if (opt === 'scope4') def.scope = true;
+  }
+  const boreY = S.bore;
+  if (att.muzzle === 'suppressor') { parts.push(tube(0.018, 0.16, 0x1d1f24, boreY, S.muzzle - 0.08)); def.muzzle -= 0.16; }
+  if (att.muzzle === 'compensator') { parts.push(tube(0.016, 0.05, STEEL, boreY, S.muzzle - 0.025)); def.muzzle -= 0.05; }
+  if ((att.grip === 'vgrip' || att.grip === 'agrip') && !short) parts.push(block(0.026, 0.07, 0.028, GRIP, 0, S.bore - 0.07, def.fore + 0.04, att.grip === 'agrip' ? -0.6 : 0));
+  if (w.id === 'lmg') { const b = part('bipod', 0.16, 0, 0, S.muzzle + 0.14, true); b.geo.translate(0, S.top - 0.05 - b.h, 0); parts.push(b.geo); }
+  if (w.tier) parts.push(block(0.003, 0.01, 0.1, new THREE.Color(RARITY[w.tier].color).getHex(), S.halfW * 0.8, S.bore - 0.015, -0.03));
+  return { geo: merge(parts), def };
+}
+
+// A matcap painted once: soft key light from the upper left, a bright
+// specular spot and a cool rim — guns read as metal with no lights.
+let matcapTex = null;
+function matcap() {
+  if (matcapTex) return matcapTex;
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d');
+  const base = g.createRadialGradient(46, 40, 4, 64, 64, 66);
+  base.addColorStop(0, '#ffffff'); base.addColorStop(0.35, '#b8b8b8'); base.addColorStop(0.8, '#5a5a5a'); base.addColorStop(1, '#2a2a2a');
+  g.fillStyle = base; g.fillRect(0, 0, 128, 128);
+  const spec = g.createRadialGradient(40, 34, 0, 40, 34, 16);
+  spec.addColorStop(0, 'rgba(255,255,255,0.9)'); spec.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = spec; g.fillRect(0, 0, 128, 128);
+  const rim = g.createRadialGradient(64, 64, 52, 64, 64, 64);
+  rim.addColorStop(0, 'rgba(150,170,210,0)'); rim.addColorStop(1, 'rgba(150,170,210,0.55)');
+  g.fillStyle = rim; g.fillRect(0, 0, 128, 128);
+  matcapTex = new THREE.CanvasTexture(c);
+  matcapTex.colorSpace = THREE.SRGBColorSpace;
+  return matcapTex;
+}
+// The models' colours are daylight albedo, mostly dark metal: lifted so
+// the sheen shows.
+const vmMat = () => new THREE.MeshMatcapMaterial({ matcap: matcap(), vertexColors: true, fog: false, color: new THREE.Color(2.2, 2.2, 2.2) });
+
+// Gloved hands: right on the grip, left on the fore-end (or cupping the
+// right on a handgun), tapered sleeves running back out of the frame.
+function limb(a, b, r0, r1, hex) {
+  const A = new THREE.Vector3(...a), B = new THREE.Vector3(...b), d = B.clone().sub(A);
+  const g = new THREE.CylinderGeometry(r1, r0, d.length(), 8);
+  g.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.clone().normalize()));
+  g.translate((A.x + B.x) / 2, (A.y + B.y) / 2, (A.z + B.z) / 2);
+  return paint(g, hex);
+}
+function fist(x, y, z) { return paint(new THREE.CapsuleGeometry(0.024, 0.035, 3, 8).rotateX(Math.PI / 2).translate(x, y, z), GLOVE); }
+function paint(g, hex) {
+  g = g.toNonIndexed();
+  const c = lin(hex), n = g.getAttribute('position').count;
+  g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * 3).map((_, i) => [c.r, c.g, c.b][i % 3]), 3));
+  g.deleteAttribute('uv');
+  return g;
+}
+function hands(def) {
+  const t = def.top;
+  const rz = def.short ? 0.0 : 0.02;
+  const g = [fist(0.004, t - 0.1, rz), limb([0.012, t - 0.115, rz + 0.04], [0.11, t - 0.3, rz + 0.36], 0.03, 0.045, SLEEVE)];
+  const [lx, ly, lz] = def.short ? [-0.02, t - 0.115, -0.005] : [-0.012, t - 0.08, def.fore];
+  g.push(fist(lx, ly, lz), limb([lx - 0.01, ly - 0.02, lz + 0.04], [-0.17, t - 0.33, lz + 0.36], 0.03, 0.045, SLEEVE));
+  return g;
+}
+
+// The star-shaped muzzle flash texture (additive, so black is clear).
+let flashTex = null;
+function flashTexture() {
+  if (flashTex) return flashTex;
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d');
+  g.translate(32, 32);
+  const r = g.createRadialGradient(0, 0, 0, 0, 0, 30);
+  r.addColorStop(0, '#fff8e0'); r.addColorStop(0.25, '#ffd070'); r.addColorStop(0.6, '#c05010'); r.addColorStop(1, '#000');
+  g.fillStyle = r;
+  g.beginPath();
+  for (let i = 0; i < 16; i++) { const a = i / 16 * Math.PI * 2, rr = i % 2 ? 9 : 31; g.lineTo(Math.cos(a) * rr, Math.sin(a) * rr); }
+  g.fill();
+  flashTex = new THREE.CanvasTexture(c);
+  flashTex.colorSpace = THREE.SRGBColorSpace;
+  return flashTex;
 }
 
 export function buildViewmodel(w, meleeId = 'knife') {
-  const W = WEAPONS[w.id];
-  const def = MODELS[W.model]();
-  const extra = fit(def, w);
-  const geo = merge([...def.parts, ...extra, ...hands(W.model)]);
-  const mat = new THREE.MeshBasicMaterial({ vertexColors: true, fog: false });
-  const mesh = new THREE.Mesh(geo, mat);
+  const { geo, def } = gunGeometry(w);
+  const mat = vmMat();
+  const mesh = new THREE.Mesh(merge([geo, ...hands(def)]), mat);
   const root = new THREE.Group();
   root.add(mesh);
-  // Muzzle flash: two crossed additive quads, shown for a frame or two.
-  const fm = new THREE.MeshBasicMaterial({ color: 0xffd27a, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false, fog: false, side: THREE.DoubleSide });
+  // Muzzle flash: a camera-facing star plus two crossed side-on quads.
+  const fm = new THREE.MeshBasicMaterial({ map: flashTexture(), color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false, side: THREE.DoubleSide });
   const flash = new THREE.Group();
+  flash.add(new THREE.Mesh(new THREE.PlaneGeometry(0.16, 0.16), fm));
   for (const r of [0, Math.PI / 2]) {
-    const q = new THREE.Mesh(new THREE.PlaneGeometry(0.12, 0.12), fm);
+    const q = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.1), fm);
     q.rotation.set(0, Math.PI / 2, r);
+    q.position.z = -0.06;
     flash.add(q);
-    const q2 = new THREE.Mesh(new THREE.PlaneGeometry(0.09, 0.09), fm);
-    q2.rotation.z = r + Math.PI / 4;
-    flash.add(q2);
   }
-  flash.position.set(0, def.sightY - 0.03, def.muzzle - 0.04);
+  flash.position.set(0, def.bore, def.muzzle - 0.02);
   flash.visible = false;
   root.add(flash);
-  // Knife (or machete), hidden until a melee.
-  const big = meleeId === 'machete';
-  const knife = new THREE.Mesh(merge([
-    block(0.02, 0.025, 0.11, GRIP, 0, 0, 0.05),
-    block(0.006, big ? 0.05 : 0.03, big ? 0.42 : 0.16, 0xd8dbe2, 0, 0.004, big ? -0.21 : -0.08),
-    block(0.06, 0.065, 0.08, GLOVE, 0, -0.01, 0.1),
-  ]), mat);
+  // Knife (or machete), hidden until a melee: the CC0 blade in a glove.
+  const blade = meleeId === 'machete' ? ['machete', 0.5] : ['knife', 0.26];
+  const B = assets.guns[blade[0]].clone();
+  B.computeBoundingBox();
+  const bb = B.boundingBox, tall = bb.max.y - bb.min.y, k = blade[1] / tall;
+  // Authored blade-up: lay it down -z, handle at the origin.
+  B.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
+  B.scale(k, k, k);
+  B.rotateX(-Math.PI / 2);
+  const knife = new THREE.Mesh(merge([B, block(0.06, 0.065, 0.08, GLOVE, 0, -0.01, 0.03).toNonIndexed()].map(x => { if (!x.getAttribute('normal')) x.computeVertexNormals(); return x; })), mat);
   knife.visible = false;
   return { root, mesh, flash, knife, def, id: w.id, key: vmKey(w, meleeId) };
+}
+
+// The same gun for the world (teammates' hands, wall-buys): Lambert-lit
+// by the scene's moon and flashlight, muzzle down -z, origin at the grip.
+export function gunModel(w) {
+  const { geo } = gunGeometry(w);
+  const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
+  const g = new THREE.Group();
+  g.add(m);
+  return g;
 }
 
 export const vmKey = (w, meleeId) => `${w.id}|${w.tier}|${Object.values(w.att || {}).join(',')}|${meleeId}`;
@@ -297,6 +352,8 @@ export class Effects {
     this.flame = [lin(0xffd060).multiplyScalar(1.8), lin(0xff7a1a).multiplyScalar(1.6), lin(0xff3a0a).multiplyScalar(1.3)];
     this.smoke = [lin(0x3a3632), lin(0x2a2826)];
     this.acid = [lin(0x9be05a).multiplyScalar(1.4), lin(0x6fb83a)];
+    this.brass = [lin(0xd8a840).multiplyScalar(1.3)];
+    this.shell = [lin(0xb02818).multiplyScalar(1.2)];
   }
 
   burst(x, y, z, n, palette, speed = 2.5, size = 0.06, up = 1.5, life = 0.7) {

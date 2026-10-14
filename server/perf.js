@@ -67,6 +67,7 @@ export function record(b) {
     final: !!b.final,
     fps: num(b.fps), p50: num(b.p50), p95: num(b.p95), p99: num(b.p99), worst: num(b.worst),
     frames: num(b.frames), draws: num(b.draws), tris: num(b.tris),
+    raf: num(b.raf), cpu: num(b.cpu), cost: num(b.cost),
     heapMB: num(b.heapMB), scale: num(b.scale), zombies: num(b.zombies), cap: num(b.cap),
     ...sysStats(),
   };
@@ -89,7 +90,7 @@ export function record(b) {
   if (rec.final || Date.now() - lastLog > 60_000) {
     lastLog = Date.now();
     console.log(`perf: ${rec.scene} ${rec.preset} fps=${rec.fps} p50=${rec.p50}ms p95=${rec.p95}ms`
-      + ` draws=${rec.draws} z=${rec.zombies} memAvail=${rec.memAvailMB}MB swap=${rec.swapUsedMB}MB`
+      + ` raf=${rec.raf} cpu=${rec.cpu} cost=${rec.cost} draws=${rec.draws} z=${rec.zombies} memAvail=${rec.memAvailMB}MB swap=${rec.swapUsedMB}MB`
       + ` kiosk=${rec.kioskPssMB}MB ${rec.socTempC}°C${rec.final ? ' (final)' : ''}`);
   }
 }
