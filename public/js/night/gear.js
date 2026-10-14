@@ -7,7 +7,7 @@ import { WEAPONS, MELEE, RARITY } from './sim/weapons.js';
 const lin = hex => new THREE.Color(hex);
 
 // A box with a baked top-light gradient, coloured once.
-function block(w, h, d, hex, x, y, z, rx = 0) {
+export function block(w, h, d, hex, x, y, z, rx = 0) {
   const g = new THREE.BoxGeometry(w, h, d);
   const pos = g.getAttribute('position');
   const c = lin(hex);
@@ -23,7 +23,7 @@ function block(w, h, d, hex, x, y, z, rx = 0) {
   return g;
 }
 
-function merge(geos) {
+export function merge(geos) {
   let n = 0;
   for (const g of geos) n += g.getAttribute('position').count;
   const pos = new Float32Array(n * 3), col = new Float32Array(n * 3), idx = [];

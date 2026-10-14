@@ -64,7 +64,7 @@ class Horde {
     this.look = {
       runner: [null, 0x7a2222], crawler: [0x6a7a5c, 0x3a3a3a], armored: [null, 0x3c4238],
       brute: [0x5f6f52, 0x5a4636], spitter: [0x8fbf5a, 0x4a5a2a], screamer: [0xc9c7b6, 0x6a6a72],
-      exploder: [0xb8b06a, 0x8a7a3a], warden: [0x6a2a24, 0x1e1a1a],
+      exploder: [0xb8b06a, 0x8a7a3a], warden: [0x6a2a24, 0x1e1a1a], climber: [0xa8b090, 0x33333c],
     };
     for (const k of Object.keys(this.look)) this.look[k] = this.look[k].map(c => (c == null ? null : lin(c)));
     this.helmetC = lin(0x3f4636); this.plateC = lin(0x2f342c); this.sacC = lin(0x9be05a); this.hornC = lin(0xd8cfb8);

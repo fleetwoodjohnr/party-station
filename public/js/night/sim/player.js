@@ -261,7 +261,7 @@ export class Player {
     this.vz += (wz - this.vz) * k;
     const p = this._p || (this._p = { x: 0, z: 0 });
     p.x = this.x + this.vx * dt; p.z = this.z + this.vz * dt;
-    world.collide(p, RADIUS, false);
+    if (!this.onTower) world.collide(p, RADIUS, false); // up a watchtower the shelter keeps you on it
     this.x = p.x; this.z = p.z;
     // Bodies: shove out of zombies so you can't walk through a horde.
     const Z = game.zombies;

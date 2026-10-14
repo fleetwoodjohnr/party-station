@@ -7,8 +7,9 @@ import { Player, emptyInput } from './player.js';
 import { Equipment } from './equipment.js';
 import { Classic } from './classic.js';
 import { Survival } from './survival.js';
+import { Shelter } from './shelter.js';
 
-export const MODES = { classic: Classic, world: Survival };
+export const MODES = { classic: Classic, world: Survival, shelter: (g, o) => new Survival(g, { ...o, shelter: Shelter }) };
 
 // Small, fast, seedable PRNG (tests and co-op replays need determinism).
 export function mulberry32(seed) {
@@ -42,7 +43,8 @@ export class Game {
       const [sx, sz] = starts[i % starts.length];
       return new Player(i, s.name, sx + 0.5 + (i % 2) * 0.8, sz + 0.5 + (i >> 1) * 0.8, 0);
     });
-    this.mode = new MODES[mode](this, modeOpts);
+    const M = MODES[mode];
+    this.mode = M.prototype ? new M(this, modeOpts) : M(this, modeOpts);
     this._flow = null; this._flowKey = ''; this._flowT = -1;
   }
 
@@ -63,6 +65,7 @@ export class Game {
       cells.push([cx, cz]);
       key += cx + ',' + cz + ';';
     }
+    for (const c of this.mode.extraTargets?.() || []) { cells.push(c); key += c + ';'; }
     const age = this.time - this._flowT;
     // Open world: only a 64-cell window around the targets is solved (the
     // rest of the county doesn't need paths), and a bit less often.

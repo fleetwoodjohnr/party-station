@@ -157,6 +157,7 @@ export const audio = {
     tone(48, 0.7, { type: 'sine', vol: 1.0 * vol, glide: 28 });
     burst({ dur: 0.5, vol: 0.4 * vol, type: 'highpass', freq: 2000, at: 0.05, pan });
   }),
+  turret: safe((pan, vol) => { ac(); burst({ dur: 0.08, vol: 0.45 * vol, freq: 3000, sweep: 800, pan }); }),
   bounce: safe(() => { ac(); tone(700 + Math.random() * 300, 0.04, { type: 'square', vol: 0.05 }); }),
   throwIt: safe(() => { ac(); burst({ dur: 0.18, vol: 0.2, type: 'bandpass', freq: 900, q: 1, sweep: 2000 }); }),
   fire: safe((pan, vol) => { ac(); for (let i = 0; i < 4; i++) burst({ dur: 0.12, vol: 0.25 * vol, type: 'bandpass', freq: 1200 + Math.random() * 1500, q: 2, pan, at: i * 0.09 }); }),

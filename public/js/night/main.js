@@ -261,6 +261,8 @@ class TitleState {
       { label: 'Classic Survival', sub: 'Hold the Route 9 Diner — doors, perks, the Forge, a Warden every tenth round', act: () => this.stack.push(modeScreen(a, this.stack, play)) },
       { label: 'Open World', sub: 'Scavenge Hollis County, day and night — missions, loot, hordes',
         act: async () => this.stack.push(await slotsScreen(a, this.stack, 'world', (slot, save) => play({ mode: 'world', slot, save }))) },
+      { label: 'Shelter', sub: 'Fortify Hollis Farm, scavenge by day, hold it through nightly raids',
+        act: async () => this.stack.push(await slotsScreen(a, this.stack, 'shelter', (slot, save) => play({ mode: 'shelter', slot, save }))) },
       { label: 'Career', sub: 'Rank, unlocks and records', act: () => this.stack.push(careerScreen(a, this.stack, this.career)) },
       { label: 'Settings', act: () => this.stack.push(settingsScreen(a, this.stack)) },
       { label: 'Controls', act: () => this.stack.push(controlsScreen(a, this.stack)) },

@@ -12,6 +12,7 @@ import { zombieHp, roundTotal, WIN_ROUND, rankOf, xpForRank } from '../public/js
 import { ZTYPES, S as ZS } from '../public/js/night/sim/zombies.js';
 import { generateWorld } from '../public/js/night/sim/regions.js';
 import { DAY_SECS, MISSIONS } from '../public/js/night/sim/survival.js';
+import { PIECES as PIECESx } from '../public/js/night/sim/shelter.js';
 
 let passed = 0;
 const ok = label => { passed++; console.log(`✓ ${label}`); };
@@ -385,5 +386,107 @@ const owGame = (seed = 9, save = null) => new Game({ world: new World(generateWo
   ok(`horde materialised near the player; open-world step with ${game.zombies.alive} zombies: ${ms.toFixed(3)} ms`);
 }
 void DAY_SECS;
+
+// ---------------------------------------------------------------- phase 5
+const shGame = (seed = 9, save = null) => new Game({ world: new World(generateWorld(seed)), mode: 'shelter', seed, modeOpts: { seed, save } });
+
+{ // building, tiers, the weakest wall, climbers
+  const game = shGame(), P = game.players[0], W = game.world, M = game.mode, Sh = M.shelter;
+  P.god = true;
+  const home = W.home;
+  // Find a clear 1×9 strip of ground on the plot to wall off.
+  let row = null;
+  for (let z = home.z0 + 2; z < home.z1 - 2 && !row; z++) {
+    for (let x = home.x0 + 2; x < home.x1 - 10; x++) {
+      let ok = true;
+      for (let k = 0; k < 9; k++) if (W.cell(x + k, z) !== C.GROUND) ok = false;
+      if (ok) { row = [x, z]; break; }
+    }
+  }
+  assert.ok(row, 'no clear ground on the plot');
+  assert.ok(Sh.canPlace('wall', home.x0 - 5, home.z0 - 5), 'building outside the plot was allowed');
+  const wood = Sh.stash.wood;
+  const walls = [];
+  for (let k = 0; k < 9; k++) walls.push(Sh.place('wall', row[0] + k, row[1]));
+  assert.ok(walls.every(Boolean) && Sh.stash.wood === wood - 36, 'walls not built / wood not spent');
+  assert.equal(W.cell(row[0], row[1]), C.STRUCT);
+  assert.ok(!W.open(row[0], row[1], true) && !W.open(row[0], row[1], false), 'a wall let something through');
+  // Upgrades need Workshop II.
+  assert.ok(!Sh.improve(walls[0].id));
+  Sh.tech = 2; Sh.stash.metal = 50;
+  assert.ok(Sh.improve(walls[0].id) && walls[0].tier === 1 && walls[0].maxHp === PIECESx.wall.hp[1]);
+  // A zombie on one side, the player on the other: it tears the weakest piece.
+  walls[4].hp = 30;
+  P.x = row[0] + 4.5; P.z = row[1] - 3.5;
+  const zi = game.zombies.spawn(ZT.walker, row[0] + 4.5, row[1] + 3.5, 1e6, 1.2, 0.5, { rise: false });
+  let hit = false;
+  for (let t = 0; t < 25 && !hit; t += DT) { game.step(DT, [emptyInput()]); hit = game.drain().some(e => e.e === 'destroyed'); }
+  assert.ok(hit, 'zombie never broke through');
+  assert.equal(W.cell(row[0] + 4, row[1]), C.GROUND, 'the broken wall is still in the grid');
+  game.zombies.clear();
+  // A climber vaults a wooden wall: shut the player in a ring of walls.
+  for (const p of Sh.pieces) if (p) Sh.demolish(p.id);
+  let rx = 0, rz = 0;
+  find: for (let z = home.z0 + 3; z < home.z1 - 9; z++) for (let x = home.x0 + 3; x < home.x1 - 3; x++) {
+    let ok = true;
+    for (let dz = -2; dz <= 8 && ok; dz++) for (let dx = -2; dx <= 2; dx++) if (W.cell(x + dx, z + dz) !== C.GROUND) { ok = false; break; }
+    if (ok) { rx = x; rz = z; break find; }
+  }
+  assert.ok(rx, 'no room on the plot for the ring');
+  for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) {
+    if (Math.max(Math.abs(dx), Math.abs(dz)) === 2 && W.cell(rx + dx, rz + dz) === C.GROUND) Sh.stash.wood += 4, Sh.place('wall', rx + dx, rz + dz);
+  }
+  P.x = rx + 0.5; P.z = rz + 0.5;
+  const ci = game.zombies.spawn(ZT.climber, rx + 0.5, rz + 6.5, 1e6, 1.8, 0.5, { rise: false });
+  let vault = false;
+  for (let t = 0; t < 12 && !vault; t += DT) { game.step(DT, [emptyInput()]); vault = game.drain().some(e => e.e === 'vault'); }
+  assert.ok(vault, 'climber never vaulted');
+  void ci; void zi;
+  ok('building costs materials and stays on the plot; tiers need Workshop II; the horde breaks the weakest wall; climbers vault wood');
+}
+
+{ // turrets need fuel + ammo, raids come at night, crafting, save/load
+  const game = shGame(), P = game.players[0], W = game.world, M = game.mode, Sh = M.shelter;
+  P.god = true;
+  const home = W.home;
+  Sh.tech = 2; Sh.stash = { wood: 99, metal: 99, parts: 99, components: 99, cloth: 20, fuel: 0 };
+  const spot = () => { for (let z = home.z0 + 1; z < home.z1; z++) for (let x = home.x0 + 1; x < home.x1; x++) if (!Sh.canPlace('turret', x, z)) return [x, z]; };
+  const [tx, tz] = spot();
+  const tur = Sh.place('turret', tx, tz);
+  const [gx, gz] = spot();
+  Sh.place('generator', gx, gz);
+  const zi = game.zombies.spawn(ZT.walker, tx + 4.5, tz + 0.5, 50, 0.01, 0.5, { rise: false });
+  run(game, 1);
+  assert.ok(game.zombies.isLive(zi), 'turret fired without power');
+  Sh.fuel = 4; Sh._power();
+  assert.ok(tur.powered, 'turret unpowered with fuel in');
+  run(game, 2);
+  assert.ok(!game.zombies.isLive(zi), 'powered turret did not kill');
+  // Crafting: ammo, then Workshop III.
+  const light = P.ammo.light;
+  assert.ok(Sh.craft('light', P) && P.ammo.light === light + 30);
+  assert.ok(Sh.craft('tech3', P) && Sh.tech === 3);
+  // Night raid.
+  P.x = home.x + 0.5; P.z = home.z + 0.5;
+  game.zcap = 20;
+  M.time = 0.7795; // a moment before dusk (0.78)
+  run(game, 2);
+  assert.ok(Sh.raid, 'no raid scheduled at dusk');
+  Sh.raid.t = Sh.raid.delay;
+  let raided = false;
+  for (let t = 0; t < 20 && !raided; t += DT) { game.step(DT, [emptyInput()]); raided = game.drain().some(e => e.e === 'raid'); }
+  run(game, 10);
+  let raiders = 0;
+  for (let i = 0; i < game.zombies.n; i++) if (game.zombies.isLive(i) && M.tag[i] === -4) raiders++;
+  assert.ok(raided && raiders > 0, 'raid never arrived');
+  // Save and load: the base comes back.
+  const pieces = Sh.count();
+  const save = JSON.parse(JSON.stringify(M.serialize()));
+  const g2 = shGame(9, save);
+  assert.equal(g2.mode.shelter.count(), pieces, 'base not restored');
+  assert.equal(g2.world.cell(tx, tz), C.STRUCT);
+  assert.equal(g2.mode.shelter.tech, 3);
+  ok(`turrets need fuel and ammo; crafting (ammo, Workshop III); a dusk raid of ${Sh.raid?.n ?? '—'} arrives; ${pieces} pieces survive save/load`);
+}
 
 console.log(`\nAll ${passed} Dead of Night sim checks passed.`);

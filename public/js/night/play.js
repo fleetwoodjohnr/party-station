@@ -8,7 +8,11 @@ import { World } from './sim/world.js';
 import { Zombies } from './sim/zombies.js';
 import { DINER } from './sim/maps.js';
 import { generateWorld } from './sim/regions.js';
-import { SurvivalHud, mapScreen, inventoryScreen } from './ow-ui.js';
+import { SurvivalHud, mapScreen, inventoryScreen, buildPanel, benchScreen } from './ow-ui.js';
+import { ShelterView } from './shelter-view.js';
+import { PIECES, PIECE_ORDER, RECIPES, TIER_NAMES } from './sim/shelter.js';
+import { ATTACHMENTS } from './sim/weapons.js';
+import { C } from './sim/world.js';
 import { emptyInput } from './sim/player.js';
 import { botInput } from './sim/bot.js';
 import { WEAPONS, PERKS, RARITY } from './sim/weapons.js';
@@ -54,7 +58,7 @@ export class PlayState {
       this.pool = new Zombies(48);
       a.view.setWorld(this.world, this.world, this.pool);
       this.game = new Game({
-        world: this.world, zombies: this.pool, mode: 'world', seats, seed,
+        world: this.world, zombies: this.pool, mode: this.kind, seats, seed,
         modeOpts: { seed, save },
       });
       this.slot = this.opts.slot || 1;
@@ -101,6 +105,12 @@ export class PlayState {
     this.hudLayer = h('div', { class: 'nn-layer' });
     a.root.insertBefore(this.hudLayer, a.uiLayer);
     this.hud = new Hud(this.hudLayer, a.input);
+    if (this.kind === 'shelter') {
+      this.shv = new ShelterView(a.view.scene, this.game.mode.shelter, a.view.staticMat);
+      this.build = null;
+      this.buildEl = h('div', { class: 'nn-panel', style: 'position:absolute;left:50%;bottom:15vh;transform:translateX(-50%);display:none;text-align:center;min-width:40vw' });
+      this.hudLayer.appendChild(this.buildEl);
+    }
     if (this.kind !== 'classic') {
       this.sv = new SurvivalHud(this.hudLayer);
       this.hud.round.style.display = 'none';
@@ -149,6 +159,10 @@ export class PlayState {
     inp.swap = I.pressed('swap'); inp.melee = I.pressed('melee');
     inp.lethal = I.pressed('lethal'); inp.tactical = I.pressed('tactical');
     inp.heal = I.pressed('heal');
+    if (this.build) {
+      // Building borrows the combat buttons (see buildStep).
+      inp.fire = inp.firePressed = inp.ads = inp.x = inp.xPressed = inp.swap = inp.melee = inp.lethal = inp.tactical = inp.crouch = false;
+    }
     inp.assist = s.aimAssist;
     return inp;
   }
@@ -180,6 +194,7 @@ export class PlayState {
       if (I.pressed('map')) { this.menus.push(mapScreen(a, this.menus, g)); return; }
       if (I.pressed('inv')) { this.menus.push(inventoryScreen(a, this.menus, g, P, () => this.vmFor())); return; }
       if (I.pressed('dright')) { this.flash = !this.flash; this.flashSet = true; audio.ui('blip'); }
+      if (this.shv) this.buildStep(I);
       const [day, dusk] = g.mode.daylight();
       a.view.setDaylight(day, dusk);
       if (!this.flashSet) this.flash = day < 0.25;
@@ -382,6 +397,35 @@ export class PlayState {
         case 'slept': this.hud.showBanner(`Day ${e.day}`, 'Rested', 2.5); break;
         case 'noSleep': this.hud.showNote('You can’t sleep with zombies nearby', 2); audio.denied(); break;
         case 'autosave': this.saveWorld(); break;
+        case 'built': audio.hammer(); break;
+        case 'upgraded': case 'repaired': audio.hammer(); this.hud.showNote(e.e === 'upgraded' ? `Upgraded to ${TIER_NAMES[e.tier]}` : 'Repaired', 1.2); break;
+        case 'buildDenied': this.hud.showNote(e.why, 1.5); audio.denied(); break;
+        case 'destroyed':
+          if (!e.demolished) { this.hud.showNote(`Your ${PIECES[e.type].name.toLowerCase()} was torn down!`, 2); }
+          this.fx.burst(e.x + 0.5, 1.2, e.z + 0.5, 14, this.fx.wood, 3, 0.12);
+          audio.board(...this.where(e.x + 0.5, e.z + 0.5));
+          break;
+        case 'pieceHit': if (Math.random() < 0.3) { const [pan, vol] = this.where(e.x + 0.5, e.z + 0.5); audio.board(pan, vol * 0.6); } break;
+        case 'turret': {
+          this.fx.tracer(e.x, e.y, e.z, e.tx, e.ty, e.tz);
+          const [pan, vol] = this.where(e.x, e.z);
+          if (vol > 0.05) audio.turret?.(pan, vol);
+          break;
+        }
+        case 'turretDry': this.hud.showNote('A turret is out of ammo — stock the storage with light ammo', 3); break;
+        case 'powerOut': this.hud.showNote('The generator ran dry — add fuel', 3); audio.powerEnd(); break;
+        case 'fueled': this.hud.showNote(`Generator: ${e.hours}h of fuel`, 1.5); break;
+        case 'shock': this.fx.burst(e.x, 0.8, e.z, 3, this.fx.spark, 3, 0.05, 2, 0.3); if (Math.random() < 0.3) audio.zap(); break;
+        case 'stashed': this.hud.showNote('Stashed your materials', 1.5); audio.buy(); break;
+        case 'crafted': this.hud.showNote(`Crafted: ${e.name}`, 1.5); audio.hammer(); break;
+        case 'openBench':
+          if (e.p === P.seat) this.menus.push(benchScreen(this.app, this.menus, g, P, this.career.xp || 0, () => this.vmFor(), RECIPES, ATTACHMENTS, rankOf));
+          break;
+        case 'raidSoon': this.hud.showBanner('A raid is coming', `They'll hit the farm from ${e.pattern}`, 4); break;
+        case 'raid': this.hud.showBanner('Raid!', `${e.n} of them — from ${e.pattern}`, 3); audio.roar(0, 1); break;
+        case 'raidOver': this.hud.showBanner(e.dawn ? 'Dawn — the raid broke' : 'Raid beaten', `${e.standing} pieces still standing`, 3.5); audio.victory(); break;
+        case 'vault': this.hud.showNote('Climbers are going over your wooden walls!', 2); break;
+        case 'climb': audio.land(); break;
         case 'roundStart':
           audio.roundStart();
           this.hud.showBanner(`Round ${e.round}`, e.boss ? 'Something big is coming' : e.round === 1 ? 'They’re coming' : 'Here they come');
@@ -429,7 +473,62 @@ export class PlayState {
     poseViewmodel(this.vm, P, dt, now / 1000, lookX, lookY);
     this.fx.update(dt);
     this.props.update(this.game, now / 1000);
+    this.shv?.update();
     for (const s of this.doorSigns) if (this.world.doors[s.id].open) s.m.visible = false;
+  }
+
+  // --------------------------------------------------------- build mode
+  // D-pad left toggles it. The cell under the reticle (or the piece the
+  // reticle is on) is the target; the ghost shows what would go there.
+  buildTarget() {
+    const P = this.P, W = this.world;
+    const [ex, ey, ez] = P.eyePos();
+    const cp = Math.cos(P.pitch), dx = -Math.sin(P.yaw) * cp, dy = Math.sin(P.pitch), dz = -Math.cos(P.yaw) * cp;
+    const hit = W.raycast(ex, ey, ez, dx, dy, dz, 6);
+    if (hit && W.cell(hit.cx, hit.cz) === C.STRUCT) return { x: hit.cx, z: hit.cz, piece: W.pieceAt(hit.cx, hit.cz) };
+    let t = dy < -0.08 ? Math.min(6, ey / -dy) : 3;
+    if (hit) t = Math.min(t, hit.t - 0.3);
+    return { x: Math.floor(ex + dx * t), z: Math.floor(ez + dz * t), piece: null };
+  }
+
+  buildStep(I) {
+    const Sh = this.game.mode.shelter;
+    if (I.pressed('dleft')) {
+      this.build = this.build ? null : { type: this.build?.type || 'wall', rot: 0 };
+      audio.ui(this.build ? 'select' : 'back');
+    }
+    if (!this.build) { this.shv.showGhost(null); buildPanel(this.buildEl, I, null); return; }
+    const B = this.build;
+    if (I.hit(1)) { this.build = null; audio.ui('back'); return; }
+    const avail = PIECE_ORDER.filter(t => PIECES[t].tier <= Sh.tech);
+    if (I.pressed('lethal') || I.pressed('tactical')) {
+      const k = avail.indexOf(B.type);
+      B.type = avail[(k + (I.pressed('lethal') ? 1 : avail.length - 1)) % avail.length];
+      audio.ui('blip');
+    }
+    if (I.pressed('swap')) { B.rot = (B.rot + 1) % 4; audio.ui('blip'); }
+    const T = this.buildTarget();
+    const D = PIECES[B.type];
+    const fmt = need => Object.entries(need).map(([k, n]) => `${n} ${k}`).join(', ');
+    const power = `Power ${Sh.power.draw}/${Sh.power.supply} · fuel ${Math.ceil(Sh.fuel)}h · ${Sh.count()} pieces`;
+    if (T.piece) {
+      const p = T.piece, u = Sh.upgradeCost(p);
+      this.shv.showGhost(null);
+      if (I.pressed('reload')) Sh.improve(p.id);
+      if (I.pressed('melee')) Sh.demolish(p.id);
+      buildPanel(this.buildEl, I, {
+        title: `${p.def.hp.length > 1 ? TIER_NAMES[p.tier] + ' ' : ''}${p.def.name} — ${Math.round(p.hp)}/${p.maxHp}`,
+        line: u ? `${u.kind === 'repair' ? 'Repair' : 'Upgrade to ' + TIER_NAMES[p.tier + 1]}: ${fmt(u.need)}` : 'Fully upgraded',
+        why: u && !Sh.have(u.need) ? 'Not enough materials' : '', power,
+      });
+      return;
+    }
+    const why = Sh.canPlace(B.type, T.x, T.z);
+    this.shv.showGhost(T.x, T.z, B.type, !why);
+    if (I.pressed('fire')) Sh.place(B.type, T.x, T.z, B.rot);
+    const P = this.P;
+    const have = Object.keys(D.cost[0]).map(k => `${k} ${(P.inv[k] || 0) + (Sh.stash[k] || 0)}`).join(' · ');
+    buildPanel(this.buildEl, I, { title: `${D.name}`, line: `Costs ${fmt(D.cost[0])} — you have ${have}`, why: why || '', power });
   }
 
   openPause(lost) {
@@ -532,6 +631,7 @@ export class PlayState {
     this._vmGroup?.traverse(o => { o.geometry?.dispose(); o.material?.dispose(); });
     this.hudLayer.remove();
     a.uiLayer.replaceChildren();
+    this.shv?.dispose();
     if (this.sv) {
       // Back to the diner for the title screen.
       a.view.setFlashlight(false);

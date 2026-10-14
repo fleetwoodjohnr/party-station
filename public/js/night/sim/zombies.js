@@ -19,6 +19,7 @@ export const ZTYPES = [
   { id: 'screamer', hp: 0.7, speed: [1.7, 2.1], dmg: 15, reach: 1.0, r: 0.28, size: 0.92, headY: 1.62, headR: 0.17, body: [0.25, 1.45], scream: { radius: 11, cd: 9, buff: 6 } },
   { id: 'exploder', hp: 1.3, speed: [0.8, 1.0], dmg: 0, reach: 1.6, r: 0.42, size: 1.12, headY: 1.62, headR: 0.17, body: [0.2, 1.5], explode: { radius: 3.6, dmg: 55, zdmg: 600 } },
   { id: 'warden', hp: 22, speed: [1.35, 1.5], dmg: 75, reach: 1.9, r: 0.65, size: 2.0, headY: 1.62, headR: 0.18, body: [0.2, 1.45], charge: true, boards: 99, boss: { slam: 4.6, slamDmg: 60, slamCd: 7, summonCd: 18 } },
+  { id: 'climber', hp: 0.7, speed: [1.6, 2.0], dmg: 28, reach: 1.0, r: 0.28, size: 0.9, headY: 1.58, headR: 0.16, body: [0.25, 1.4], climb: true },
 ];
 export const ZT = Object.fromEntries(ZTYPES.map((t, i) => [t.id, i]));
 
@@ -48,7 +49,8 @@ export class Zombies {
     this.homeX = f(); this.homeZ = f();         // where an unaware zombie drifts around
     this.senseT = f();                          // next awareness check
     this.sight = 15;                            // metres a zombie notices you from (mode sets it)
-    this.win = new Int16Array(n).fill(-1);
+    this.win = new Int16Array(n).fill(-1);       // window being torn (-2: climbing over a wall)
+    this.sid = new Int32Array(n).fill(-1);       // shelter piece being torn
     this.target = new Int8Array(n);
     this.headKill = new Uint8Array(n); // died to a headshot (renderer pops the head)
     this.seed = new Uint32Array(n);    // per-zombie variety (skin, gait)
@@ -77,7 +79,7 @@ export class Zombies {
       this.helmet[i] = T.armor ? hp * T.armor.helmet : 0;
       this.vest[i] = T.armor ? hp * T.armor.vest : 0;
       this.slowT[i] = 0; this.buffT[i] = 0; this.burnT[i] = 0; this.burnDps[i] = 0; this.burnBy[i] = -1;
-      this.win[i] = -1; this.target[i] = 0; this.headKill[i] = 0;
+      this.win[i] = -1; this.sid[i] = -1; this.target[i] = 0; this.headKill[i] = 0;
       this.seed[i] = (rngv * 4294967295) >>> 0;
       this.alive++;
       return i;
@@ -256,6 +258,17 @@ export class Zombies {
         if (this.t[i] >= RISE_T) { this.state[i] = S.CHASE; this.t[i] = 0; this.y[i] = 0; }
         return;
       case S.BREACH: {
+        if (this.sid[i] >= 0) {
+          // Tearing at a shelter wall / gate / turret.
+          const p = world.pieces?.[this.sid[i]];
+          if (!p) { this.sid[i] = -1; this.state[i] = S.CHASE; this.t[i] = 0; return; }
+          this._face(i, p.x + 0.5, p.z + 0.5, h);
+          if (this.t[i] >= 1.0 * (this.slowT[i] > 0 ? 2 : 1)) {
+            this.t[i] = 0;
+            ev.push({ e: 'structHit', sid: p.id, dmg: T.dmg * (T.boards || 1), z: i });
+          }
+          return;
+        }
         const W = world.windows[this.win[i]];
         if (!W || W.boards === 0) { this._enterWindow(i, W); return; }
         this._face(i, W.x + 0.5, W.y + 0.5, h);
@@ -268,6 +281,17 @@ export class Zombies {
         return;
       }
       case S.CLIMB: {
+        if (this.win[i] === -2) {
+          // Over a wooden wall: straight across to the far side.
+          const tx = this.chX[i], tz = this.chZ[i];
+          this._face(i, tx, tz, h);
+          this._moveToward(i, tx, tz, 1.4 * h, world);
+          this.y[i] = Math.sin(Math.min(1, this.t[i] / 1.4) * Math.PI) * 1.6;
+          if ((this.x[i] - tx) ** 2 + (this.z[i] - tz) ** 2 < 0.05 || this.t[i] > 2.5) {
+            this.state[i] = S.CHASE; this.t[i] = 0; this.y[i] = 0; this.win[i] = -1;
+          }
+          return;
+        }
         // Hauling itself over the sill: slow, straight through.
         const W = world.windows[this.win[i]];
         const tx = W.in[0] + 0.5, tz = W.in[1] + 0.5;
@@ -353,7 +377,24 @@ export class Zombies {
       const nx = flow.stamp[ci] === flow.gen ? flow.next[ci] : -1;
       if (nx >= 0) {
         const ncx = nx % world.w, ncz = (nx - ncx) / world.w;
-        if (world.cell(ncx, ncz) === C.WINDOW) {
+        const piece = world.cell(ncx, ncz) === C.STRUCT ? world.pieceAt(ncx, ncz) : null;
+        if (piece && !piece.def.passZ) {
+          if (Math.hypot(this.x[i] - (ncx + 0.5), this.z[i] - (ncz + 0.5)) < 1.05 + T.r) {
+            const beyond = flow.stamp[nx] === flow.gen ? flow.next[nx] : -1;
+            if (T.climb && piece.tier === 0 && piece.def.climbable && beyond >= 0) {
+              const bx = beyond % world.w, bz = (beyond - bx) / world.w;
+              this.win[i] = -2; this.chX[i] = bx + 0.5; this.chZ[i] = bz + 0.5;
+              this.state[i] = S.CLIMB; this.t[i] = 0;
+              ev.push({ e: 'vault', z: i });
+            } else if (T.explode) {
+              this.state[i] = S.FUSE; this.t[i] = 0; ev.push({ e: 'fuse', z: i });
+            } else {
+              this.sid[i] = piece.id; this.state[i] = S.BREACH; this.t[i] = rng ? rng() * 0.5 : 0;
+            }
+            return;
+          }
+          tx = ncx + 0.5; tz = ncz + 0.5;
+        } else if (world.cell(ncx, ncz) === C.WINDOW) {
           const wi = world.win[nx];
           const W = world.windows[wi];
           // Walk to the outside sill first, then tear or climb.

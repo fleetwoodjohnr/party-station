@@ -160,6 +160,9 @@ export class Survival {
     return g.rng() < (night ? 0.35 : 0.08) + Math.min(0.2, this.day * 0.02) ? ZT.runner : ZT.walker;
   }
 
+  // During a raid the farm itself is a target (shelter.js).
+  extraTargets() { return this.shelter?.extraTargets() || []; }
+
   // An open cell 26–42 m from P that P can't see, or null.
   _ringCell(P, lo = 26, hi = 42) {
     const g = this.game, W = g.world;
@@ -167,7 +170,7 @@ export class Survival {
     for (let k = 0; k < 8; k++) {
       const a = g.rng() * Math.PI * 2, d = lo + g.rng() * (hi - lo);
       const x = Math.floor(P.x + Math.cos(a) * d), z = Math.floor(P.z + Math.sin(a) * d);
-      if (!W.open(x, z, true)) continue;
+      if (!W.open(x, z, true) || this.shelter?.inPlot(x, z)) continue;
       if (W.sees(ex, ey, ez, x + 0.5, 1.5, z + 0.5) && !(this.night && d > 32)) continue;
       return [x + 0.5, z + 0.5];
     }

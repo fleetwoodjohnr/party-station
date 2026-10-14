@@ -4,14 +4,14 @@
 // collision, a 3D ray march for bullets and sight lines, and the shared
 // flow field every zombie steers by.
 
-export const C = { FLOOR: 0, GROUND: 1, WALL: 2, WINDOW: 3, DOOR: 4, PROP: 5, TREE: 6, CAR: 7, FENCE: 8, VOID: 9, MACHINE: 10 };
+export const C = { FLOOR: 0, GROUND: 1, WALL: 2, WINDOW: 3, DOOR: 4, PROP: 5, TREE: 6, CAR: 7, FENCE: 8, VOID: 9, MACHINE: 10, STRUCT: 11 };
 const CHAR = {
   '.': C.FLOOR, P: C.FLOOR, ',': C.GROUND, S: C.GROUND, '#': C.WALL, W: C.WINDOW,
   T: C.PROP, t: C.TREE, c: C.CAR, f: C.FENCE, X: C.VOID, M: C.MACHINE,
 };
 // Solid height of each cell type, for bullets and the renderer. Windows are
 // special-cased: a hole between WIN_LO and WIN_HI.
-export const TOP = [0, 0, 3.2, 3.2, 3.2, 1.0, 7, 1.4, 1.2, 50, 2.1];
+export const TOP = [0, 0, 3.2, 3.2, 3.2, 1.0, 7, 1.4, 1.2, 50, 2.1, 3.2];
 export const CEIL = 3.2;              // interior ceiling height
 export const WIN_LO = 0.9, WIN_HI = 2.2;
 export const MAX_BOARDS = 6;
@@ -95,6 +95,30 @@ export class World {
   }
 
   idx(x, y) { return y * this.w + x; }
+  // ---------------------------------------------------- built structures
+  // Shelter pieces (sim/shelter.js) sit on top of a ground/floor cell:
+  // the cell becomes STRUCT, `struct[i]` points at the piece, and the
+  // piece's def says who can walk through it and how tall it is.
+  setStruct(x, y, piece) {
+    if (!this.struct) { this.struct = new Int32Array(this.w * this.h).fill(-1); this.under = new Uint8Array(this.w * this.h); this.pieces = []; }
+    const i = y * this.w + x;
+    if (piece) {
+      this.under[i] = this.cells[i];
+      this.cells[i] = C.STRUCT;
+      this.struct[i] = piece.id;
+      this.pieces[piece.id] = piece;
+    } else if (this.cells[i] === C.STRUCT) {
+      this.cells[i] = this.under[i];
+      this.pieces[this.struct[i]] = undefined;
+      this.struct[i] = -1;
+    }
+    this.version++;
+  }
+  pieceAt(x, y) {
+    if (this.cell(x, y) !== C.STRUCT) return null;
+    return this.pieces[this.struct[y * this.w + x]] || null;
+  }
+
   // Open world: which 64 m region a point is in (null on hand-built maps).
   regionAt(x, z) {
     if (!this.regions) return null;
@@ -111,6 +135,7 @@ export class World {
   open(x, y, zombie = false) {
     const c = this.cell(x, y);
     if (c === C.FLOOR || c === C.GROUND) return true;
+    if (c === C.STRUCT) { const p = this.pieceAt(x, y); return zombie ? !!p?.def.passZ : !!p?.def.passP; }
     if (c === C.DOOR) return this.doors[this.door[y * this.w + x]].open;
     if (c === C.WINDOW) return zombie && this.windows[this.win[y * this.w + x]].boards === 0;
     return false;
@@ -173,6 +198,7 @@ export class World {
       case C.WINDOW: return y < WIN_LO || y > WIN_HI;
       case C.DOOR: return !this.doors[this.door[cz * this.w + cx]].open || y > CEIL;
       case C.PROP: case C.MACHINE: return y < TOP[c] || y > CEIL;
+      case C.STRUCT: return y < (this.pieceAt(cx, cz)?.def.h ?? 3.2);
       default: return y < TOP[c];
     }
   }
@@ -210,6 +236,7 @@ export class World {
       case C.WINDOW: lo = WIN_LO; hi = WIN_HI; break;
       case C.DOOR: if (this.doors[this.door[cz * this.w + cx]].open) { lo = 0; hi = CEIL; } else return t0; break;
       case C.PROP: case C.MACHINE: lo = TOP[c]; hi = CEIL; break;
+      case C.STRUCT: lo = this.pieceAt(cx, cz)?.def.h ?? 3.2; hi = Infinity; break;
       default: lo = TOP[c]; hi = Infinity;
     }
     const y0 = oy + dy * t0, y1 = oy + dy * t1;
@@ -314,6 +341,14 @@ export class World {
     if (c === C.FLOOR || c === C.GROUND) return 1;
     if (c === C.WINDOW) return 1 + this.windows[this.win[y * this.w + x]].boards * 2;
     if (c === C.DOOR) return this.doors[this.door[y * this.w + x]].open ? 1 : -1;
+    if (c === C.STRUCT) {
+      // Walkable pieces (spikes) cost a little; blocking ones cost by
+      // health, so the horde heads for the weakest wall and tears at it.
+      const p = this.pieceAt(x, y);
+      if (!p) return 1;
+      if (p.def.passZ) return 3;
+      return Math.min(100, 2 + Math.round(p.hp / 40));
+    }
     return -1;
   }
 }

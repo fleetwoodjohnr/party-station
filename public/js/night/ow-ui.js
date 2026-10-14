@@ -197,3 +197,47 @@ export async function slotsScreen(app, stack, mode, onPick) {
     ],
   };
 }
+
+// ------------------------------------------------------------ build HUD
+export function buildPanel(el, input, info) {
+  if (!info) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  const g = b => input.glyph(b);
+  el.innerHTML = `<div style="font-weight:900;font-size:1.1em">${info.title}</div>`
+    + `<div style="opacity:.9">${info.line}</div>`
+    + (info.why ? `<div style="color:#ff8a7a">${info.why}</div>` : '')
+    + `<div style="opacity:.8;font-size:.85em;margin-top:.3em">${info.power}</div>`
+    + `<div style="margin-top:.4em;font-size:.85em">${g('fire')}build ${g('tactical')}${g('lethal')}piece ${g('swap')}turn ${g('reload')}repair/upgrade ${g('melee')}demolish ${g(1)}done</div>`;
+}
+
+// ------------------------------------------------------------ workbench
+export function benchScreen(app, stack, game, P, careerXp, onChange, RECIPES, ATT, rankOf) {
+  const Sh = game.mode.shelter;
+  const fmt = need => Object.entries(need).map(([k, n]) => `${n} ${ITEMS[k]?.name.toLowerCase() || k}`).join(', ');
+  const items = RECIPES.map(r => {
+    const why = Sh.canCraft(r, P);
+    const need = r.give.upgrade ? Sh.upgradeNeed(P.weapon) : r.need;
+    return { label: r.name, sub: (need ? fmt(need) : '') + (why ? ` — ${why}` : ''), disabled: !!why,
+      act: () => { if (Sh.craft(r.id, P)) { onChange?.(); stack.pop(); stack.push(benchScreen(app, stack, game, P, careerXp, onChange, RECIPES, ATT, rankOf)); } } };
+  });
+  items.push({ label: 'Craft an attachment', sub: '3 weapon parts, 2 components — any you’ve unlocked by rank', act: () => {
+    const list = Object.entries(ATT).filter(([, a]) => a.rank <= rankOf(careerXp)).map(([id, a]) => ({
+      label: a.name, sub: a.slot, disabled: !Sh.have({ parts: 3, components: 2 }),
+      act: () => { if (Sh.craftAttachment(id, P, careerXp)) { onChange?.(); stack.pop(); } },
+    }));
+    list.push({ label: 'Back', act: () => stack.pop() });
+    const m = new Menu(list, { onBack: () => stack.pop() });
+    stack.push({ handle: (i, s) => m.handle(i, s), el: () => [h('div', { style: 'position:absolute;left:7vw;top:9vh;font-size:2.2em;font-weight:900' }, 'ATTACHMENTS'), m.el(), hints(app.input, [[0, 'Craft'], [1, 'Back']])] });
+  } });
+  items.push({ label: 'Close', act: () => stack.pop() });
+  const menu = new Menu(items, { onBack: () => stack.pop() });
+  const stash = () => h('div', { class: 'nn-panel nn-inv' },
+    h('div', { style: 'font-weight:900;font-size:1.1em;margin-bottom:.4em' }, `Workshop ${'I'.repeat(Sh.tech)}`),
+    ...Object.keys(ITEMS).filter(k => (Sh.stash[k] || 0) + (P.inv[k] || 0) > 0).map(k => h('div', { style: 'display:flex;justify-content:space-between' },
+      h('span', {}, ITEMS[k].name), h('b', {}, `${(Sh.stash[k] || 0) + (P.inv[k] || 0)}`))),
+    h('div', { style: 'margin-top:.5em;opacity:.8' }, `Turret ammo in storage: ${Sh.stashAmmo.light || 0}`));
+  return {
+    handle: (i, s) => menu.handle(i, s),
+    el: () => [h('div', { style: 'position:absolute;left:7vw;top:9vh;font-size:2.2em;font-weight:900;letter-spacing:.08em' }, 'WORKBENCH'), menu.el(), stash(), hints(app.input, [[0, 'Craft'], [1, 'Close']])],
+  };
+}
