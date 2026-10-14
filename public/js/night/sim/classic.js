@@ -119,6 +119,13 @@ export class Classic {
     this.dropsThisRound = 0;
     this.repairPts.clear();
     if (boss) this.bossPending = 4;
+    // Co-op: whoever bled out is back for the new round.
+    for (const P of g.players) {
+      if (!P.dead) continue;
+      P.dead = false; P.revive(g, 1);
+      const [sx, sz] = g.world.starts[0];
+      P.x = sx + 0.5 + P.seat * 0.6; P.z = sz + 0.5;
+    }
     // Grenades and claymores come back each round.
     for (const P of g.players) {
       if (P.lethal) P.lethal.n = Math.min(EQUIP[P.lethal.id].max, P.lethal.n + 2);
@@ -221,6 +228,11 @@ export class Classic {
         this.dropsThisRound++;
         this._drop(this._pickDrop(), ev.x, ev.zz);
       }
+    }
+    if (ev.e === 'down' && g.players.length > 1) {
+      // Co-op: going down costs your perks.
+      const D = g.players[ev.p];
+      if (D) { D.perks.clear(); D.maxHp = 100; }
     }
     if (ev.e === 'down') {
       const D = g.players[ev.p];
@@ -406,6 +418,8 @@ export class Classic {
   // --------------------------------------------------------- interaction
   interactTarget(P) {
     const g = this.game, W = g.world;
+    const rv = g.reviveTarget(P);
+    if (rv) return rv;
     let best = null, bd = Infinity;
     const consider = (d, t) => { if (d < bd) { bd = d; best = t; } };
     const near = (x, z, r) => { const d = Math.hypot(P.x - x, P.z - z); return d < r ? d : -1; };
@@ -475,6 +489,7 @@ export class Classic {
 
   interact(P, t, dt, pressed) {
     const g = this.game, W = g.world;
+    if (t.kind === 'revive') { g.reviveStep(P, t, dt); return; }
     if (t.kind === 'repair') {
       P._repairT = (P._repairT || 0) + dt;
       if (P._repairT < BOARD_EVERY) return;

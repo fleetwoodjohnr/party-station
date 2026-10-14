@@ -129,6 +129,7 @@ function syncFor(recipient, isTV, shared = sharedState()) {
       youAreHost: !isTV && recipient?.id === hostPid(),
       over: session.over || null,
     };
+    if (isTV && session.mode === 'relay') msg.game.sim = !session.simTv || session.simTv === recipient;
     if (session.mode === 'server' && session.game) {
       msg.game.pub = session.game.pub();
       if (yourSeat >= 0) msg.game.priv = session.game.priv(yourSeat);
@@ -234,6 +235,12 @@ function startGame() {
     gameId: lobby.gameId, mode: meta.mode, options: lobby.options,
     seats, game: null, over: null, botTimers: new Map(),
   };
+  // Relay games run on one screen (the host's); any other TV in the game
+  // renders its snapshots and sends its own players' inputs (co-op).
+  if (meta.mode === 'relay') {
+    const host = players.get(lobby.hostPid);
+    session.simTv = host?.viaTv && tvSockets.has(host.viaTv) ? host.viaTv : [...tvSockets][0];
+  }
   if (meta.mode === 'server') {
     session.game = mod.create({
       seats: seats.map(s => ({ name: s.name, bot: s.bot })),
@@ -363,6 +370,11 @@ function onPlayerMsg(p, m) {
     case 'joinLobby': {
       if (phase !== 'lobby' || lobby.humans.includes(p.id)) break;
       const meta = byId(lobby.gameId).meta;
+      // First-person games need a screen per player: one pad per TV.
+      if (meta.onePerScreen && p.viaTv && lobby.humans.some(h => players.get(h)?.viaTv === p.viaTv)) {
+        toast(p, 'One player per screen — join from another TV or a browser at this address/tv');
+        break;
+      }
       if (lobbySize() >= meta.maxPlayers) {
         if (lobby.bots.length) lobby.bots.pop(); // humans displace bots
         else { toast(p, 'This table is full.'); break; }
@@ -556,6 +568,20 @@ function onTvMsg(ws, m) {
       phase = 'gameover';
       broadcast(); break;
     }
+    case 'relayState': { // the simulating TV's snapshot -> every other TV
+      if (phase !== 'game' || session?.mode !== 'relay' || ws !== session.simTv) break;
+      const out = JSON.stringify({ t: 'relayState', d: m.d });
+      for (const t of tvSockets) if (t !== ws && t.readyState === 1) t.send(out);
+      break;
+    }
+    case 'relayInput': case 'relayAct': { // a remote TV's player -> the simulating TV
+      if (phase !== 'game' || session?.mode !== 'relay' || !session.simTv || ws === session.simTv) break;
+      const seat = session.seats[m.seat];
+      const owner = seat && !seat.bot && players.get(seat.pid);
+      if (!owner || owner.viaTv !== ws) break; // a screen only drives its own players
+      send(session.simTv, { t: m.t, seat: m.seat, d: m.d });
+      break;
+    }
     case 'relayQuit': { // an immersive game's own "Quit to Party Station"
       if (phase === 'game' && session?.mode === 'relay') returnToHub();
       break;
@@ -610,8 +636,8 @@ export function handleConnection(ws) {
         if (!lobby.humans.length) { returnToHub(); return; }
         if (!players.get(lobby.hostPid)?.connected) lobby.hostPid = lobby.humans[0];
       }
-      // A relay game cannot outlive its screen.
-      if (phase === 'game' && session?.mode === 'relay' && tvSockets.size === 0) {
+      // A relay game cannot outlive its screen (or, in co-op, its host's).
+      if (phase === 'game' && session?.mode === 'relay' && (tvSockets.size === 0 || session.simTv === ws)) {
         toast('all', 'The big screen disconnected — arcade game ended.');
         returnToHub();
         return;

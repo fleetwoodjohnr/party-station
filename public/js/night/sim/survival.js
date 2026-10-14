@@ -33,7 +33,7 @@ export const MISSIONS = [
 ];
 
 export class Survival {
-  constructor(game, { save = null, seed = 1, shelter = null } = {}) {
+  constructor(game, { save = null, seed = 1, shelter = null, sharedLoot = false } = {}) {
     this.game = game;
     this.id = 'world';
     this.seed = seed;
@@ -64,6 +64,8 @@ export class Survival {
     if (this.shelter) this.id = 'shelter';
     if (save) this.load(save);
     else this._spawnHorde(3);
+    // Co-op option: one pack and one ammo bag for the whole group.
+    if (sharedLoot) for (const P of game.players.slice(1)) { P.inv = game.players[0].inv; P.ammo = game.players[0].ammo; }
   }
 
   // ---------------------------------------------------------------- time
@@ -317,7 +319,8 @@ export class Survival {
     for (const P of g.players) {
       if (!P.down) continue;
       P._respawnT = (P._respawnT || 0) + dt;
-      if (g.players.length > 1 && g.players.some(q => !q.down)) continue; // co-op: wait for a revive
+      if (g.players.length > 1 && g.players.some(q => !q.down) && !P.dead) continue; // co-op: wait for a revive
+      if (P.dead) { P.dead = false; P.downT = 0; }
       if (P._respawnT < 4) continue;
       P._respawnT = 0;
       const pack = { x: P.x, z: P.z, inv: { ...P.inv }, day: this.day };
@@ -355,6 +358,8 @@ export class Survival {
   // --------------------------------------------------------- interaction
   interactTarget(P) {
     const g = this.game, W = g.world;
+    const rv = g.reviveTarget(P);
+    if (rv) return rv;
     let best = null, bd = 1.7;
     const consider = (d, t) => { if (d < bd) { bd = d; best = t; } };
     const M = this.currentMission();
@@ -384,6 +389,7 @@ export class Survival {
 
   interact(P, t, dt, pressed) {
     const g = this.game;
+    if (t.kind === 'revive') { g.reviveStep(P, t, dt); return; }
     if (this.shelter && this.shelter.interact(P, t, dt, pressed)) return;
     if (t.kind === 'search') {
       if (t.full) return;
@@ -557,12 +563,9 @@ export class Survival {
       zones: [...this.zonesCleared], mission: this.mission, mState: this.mState,
       explored: Array.from(this.explored).join(''), packs: this.packs,
       hordes: this.hordes.map(H => ({ x: H.x, z: H.z, n: H.n, tx: H.tx, tz: H.tz })),
-      player: {
-        x: P.x, z: P.z, yaw: P.yaw, hp: P.hp, maxHp: P.maxHp, cur: P.cur, meleeId: P.meleeId,
-        weapons: P.weapons.map(w => ({ id: w.id, tier: w.tier, att: w.att, mag: w.mag })),
-        ammo: P.ammo, inv: P.inv, found: P.found, hunger: P.hunger, thirst: P.thirst,
-        lethal: P.lethal, tactical: P.tactical, perks: [...P.perks], xpBanked: (P.xpBanked || 0) + P.xp,
-      },
+      player: this._savePlayer(P),
+      // Co-op survivors, matched back by name when the save is loaded.
+      others: g.players.slice(1).map(Q => ({ name: Q.name, ...this._savePlayer(Q) })),
       shelter: this.shelter?.serialize() || null,
     };
   }
@@ -576,14 +579,26 @@ export class Survival {
     if (s.explored) for (let i = 0; i < Math.min(s.explored.length, this.explored.length); i++) this.explored[i] = s.explored.charCodeAt(i) === 49 ? 1 : 0;
     this.packs = s.packs || [];
     this.hordes = (s.hordes || []).map(H => ({ ...H, active: false }));
-    const q = s.player;
-    if (q) {
-      Object.assign(P, { x: q.x, z: q.z, yaw: q.yaw, hp: q.hp, maxHp: q.maxHp || MAX_HP, meleeId: q.meleeId || 'knife',
-        ammo: q.ammo, inv: q.inv, found: q.found || [], hunger: q.hunger, thirst: q.thirst, lethal: q.lethal, tactical: q.tactical });
-      P.weapons = q.weapons.map(w => { const n = newWeapon(w.id, false, w.tier, w.att); n.mag = w.mag; n.reserve = 0; return n; });
-      P.cur = Math.min(q.cur || 0, P.weapons.length - 1);
-      P.perks = new Set(q.perks || []);
+    if (s.player) this._loadPlayer(P, s.player);
+    for (const Q of g.players.slice(1)) {
+      const q = (s.others || []).find(o => o.name.toLowerCase() === Q.name.toLowerCase());
+      if (q) this._loadPlayer(Q, q);
     }
     this.shelter?.load(s.shelter);
+  }
+  _savePlayer(P) {
+    return {
+      x: P.x, z: P.z, yaw: P.yaw, hp: P.hp, maxHp: P.maxHp, cur: P.cur, meleeId: P.meleeId,
+      weapons: P.weapons.map(w => ({ id: w.id, tier: w.tier, att: w.att, mag: w.mag })),
+      ammo: P.ammo, inv: P.inv, found: P.found, hunger: P.hunger, thirst: P.thirst,
+      lethal: P.lethal, tactical: P.tactical, perks: [...P.perks],
+    };
+  }
+  _loadPlayer(P, q) {
+    Object.assign(P, { x: q.x, z: q.z, yaw: q.yaw, hp: q.hp, maxHp: q.maxHp || MAX_HP, meleeId: q.meleeId || 'knife',
+      ammo: q.ammo, inv: q.inv, found: q.found || [], hunger: q.hunger, thirst: q.thirst, lethal: q.lethal, tactical: q.tactical });
+    P.weapons = q.weapons.map(w => { const n = newWeapon(w.id, false, w.tier, w.att); n.mag = w.mag; n.reserve = 0; return n; });
+    P.cur = Math.min(q.cur || 0, P.weapons.length - 1);
+    P.perks = new Set(q.perks || []);
   }
 }

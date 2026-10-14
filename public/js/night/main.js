@@ -107,7 +107,9 @@ class App {
     this.opts = ctx.options || {};
     this.runId = Math.random().toString(36).slice(2, 10);
     this.settings = structuredClone(DEFAULT_SETTINGS);
-    this.input = new PadInput(() => ctx.gamepad?.(0), this.settings);
+    // The pad of this screen's own player (in co-op that isn't seat 0 on
+    // a guest's screen).
+    this.input = new PadInput(() => ctx.gamepad?.(ctx.localSeats?.()[0] ?? 0), this.settings);
     this.stats = new FrameStats();
     this.gov = new Governor(this.opts.bench ? (this.opts.preset || 'balanced') : this.settings.quality);
     this.stopped = false;
@@ -134,7 +136,11 @@ class App {
       return;
     }
     this.applyResolution();
-    if (this.opts.bench && this.opts.scene === 'classic') {
+    if (ctx.sim === false) {
+      // Co-op guest: wait for the host's first snapshot to know the game.
+      this.setState(new WaitState(this));
+      loadProfile('settings').then(s => { if (s) this.applySettings(s); });
+    } else if (this.opts.bench && this.opts.scene === 'classic') {
       this.perfEl.style.display = '';
       this.setState(new PlayState(this, { autopilot: true, startRound: 10, benchSecs: Number(this.opts.secs) || 60 }));
     } else if (this.opts.bench) this.setState(new BenchState(this));
@@ -231,6 +237,13 @@ class App {
     this.ctx.quit?.();
   }
 
+  onNet(m) {
+    if (this.state?.onNet) this.state.onNet(m);
+  }
+  startClient(meta) {
+    this.setState(new PlayState(this, { client: true, mode: meta.kind, seed: meta.seed, standard: meta.standard, meta }));
+  }
+
   stop() {
     this.stopped = true;
     this.state?.exit?.();
@@ -300,6 +313,24 @@ class TitleState {
     a.view.setEye(cx, 4.2, cz, Math.atan2(cx - 24, cz - 17), -0.12);
   }
   exit() { this.stack.closed = true; this.app.pool.clear(); }
+}
+
+// --------------------------------------------------------- co-op guest
+// A screen that isn't hosting waits here until the host starts a match.
+class WaitState {
+  constructor(app) { this.app = app; this.scene = 'wait'; this.t = 0; }
+  enter() {
+    const host = (this.app.ctx.seats || []).find(s => !s.bot)?.name || 'the host';
+    mount(this.app.uiLayer, h('div', { class: 'nn-dim' }), h('div', { class: 'nn-center' },
+      h('div', { class: 'nn-title', style: 'font-size:clamp(36px,5vw,90px)' }, 'Dead of Night'),
+      h('div', { style: 'font-size:1.3em;margin-top:.6em' }, `Co-op with ${host}`),
+      h('div', { style: 'opacity:.75;margin-top:.3em' }, 'Waiting for the host to choose a mode…')));
+  }
+  onNet(m) { if (m.t === 'relayState' && m.d?.meta) this.app.startClient(m.d.meta); }
+  update(dt) {
+    this.t += dt;
+    this.app.view.setEye(24 + Math.cos(this.t * 0.05) * 20, 4.2, 17 + Math.sin(this.t * 0.05) * 16, this.t * 0.05 + Math.PI / 2, -0.12);
+  }
 }
 
 // ---------------------------------------------------------------- bench
@@ -375,5 +406,6 @@ export function start(holder, ctx) {
   return {
     stop: () => app.stop(),
     rehome: h2 => { if (root.parentNode !== h2) h2.appendChild(root); },
+    net: m => app.onNet(m),
   };
 }

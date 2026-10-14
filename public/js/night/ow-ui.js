@@ -137,17 +137,15 @@ export function mapScreen(app, stack, game) {
 }
 
 // ------------------------------------------------------------ inventory
-export function inventoryScreen(app, stack, game, P, onChange) {
-  const M = game.mode;
-  const reopen = () => { stack.pop(); stack.push(inventoryScreen(app, stack, game, P, onChange)); };
+export function inventoryScreen(app, stack, game, P, onChange, act = d => (d.a === 'use' ? game.mode.useItem(P, d.item) : game.mode.equipFound(P, d.k))) {
   const items = [];
   for (const id of ['food', 'water', 'meds']) {
     items.push({ label: `${ITEMS[id].name}`, val: () => `×${P.inv[id] || 0}`, disabled: !(P.inv[id] > 0),
       sub: { food: 'Eat (+35 food)', water: 'Drink (+40 water)', meds: 'Heal 60' }[id],
-      act: () => { if (M.useItem(P, id)) { onChange?.('used'); reopen(); } } });
+      act: () => { if (act({ a: 'use', item: id })) { onChange?.('used'); stack.pop(); } } });
   }
   P.found.forEach((f, k) => items.push({ label: lootLabel(f), sub: f.gun ? `Equip (replaces your ${P.weapons.length < 2 ? 'empty slot' : 'gun in hand'})` : 'Fit to the gun in hand',
-    act: () => { if (M.equipFound(P, k)) { onChange?.('equip'); reopen(); } } }));
+    act: () => { if (act({ a: 'equip', k })) { onChange?.('equip'); stack.pop(); } } }));
   items.push({ label: 'Close', act: () => stack.pop() });
   const res = Object.keys(ITEMS).filter(id => !['food', 'water', 'meds'].includes(id) && P.inv[id] > 0);
   const panel = () => h('div', { class: 'nn-panel nn-inv' },
@@ -211,19 +209,20 @@ export function buildPanel(el, input, info) {
 }
 
 // ------------------------------------------------------------ workbench
-export function benchScreen(app, stack, game, P, careerXp, onChange, RECIPES, ATT, rankOf) {
+export function benchScreen(app, stack, game, P, careerXp, onChange, RECIPES, ATT, rankOf, act = null) {
   const Sh = game.mode.shelter;
+  act ||= d => (d.a === 'craft' ? Sh.craft(d.id, P) : Sh.craftAttachment(d.id, P, careerXp));
   const fmt = need => Object.entries(need).map(([k, n]) => `${n} ${ITEMS[k]?.name.toLowerCase() || k}`).join(', ');
   const items = RECIPES.map(r => {
     const why = Sh.canCraft(r, P);
     const need = r.give.upgrade ? Sh.upgradeNeed(P.weapon) : r.need;
     return { label: r.name, sub: (need ? fmt(need) : '') + (why ? ` — ${why}` : ''), disabled: !!why,
-      act: () => { if (Sh.craft(r.id, P)) { onChange?.(); stack.pop(); stack.push(benchScreen(app, stack, game, P, careerXp, onChange, RECIPES, ATT, rankOf)); } } };
+      act: () => { if (act({ a: 'craft', id: r.id })) { onChange?.(); stack.pop(); } } };
   });
   items.push({ label: 'Craft an attachment', sub: '3 weapon parts, 2 components — any you’ve unlocked by rank', act: () => {
     const list = Object.entries(ATT).filter(([, a]) => a.rank <= rankOf(careerXp)).map(([id, a]) => ({
       label: a.name, sub: a.slot, disabled: !Sh.have({ parts: 3, components: 2 }),
-      act: () => { if (Sh.craftAttachment(id, P, careerXp)) { onChange?.(); stack.pop(); } },
+      act: () => { if (act({ a: 'craftAtt', id, xp: careerXp })) { onChange?.(); stack.pop(); } },
     }));
     list.push({ label: 'Back', act: () => stack.pop() });
     const m = new Menu(list, { onBack: () => stack.pop() });

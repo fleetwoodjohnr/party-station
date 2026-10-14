@@ -39,3 +39,35 @@ export function joinUrl(port) {
   const suffix = !port || Number(port) === 80 ? '' : `:${port}`;
   return `${host || ips[0] || 'party-station.local'}${suffix}`;
 }
+
+// Other Party Stations on the LAN (for co-op "Join a friend"): probe the
+// /24 around each of our addresses for anything answering /api/status like
+// a station does. ~250 tiny requests, 48 at a time, 700 ms timeout — a few
+// seconds, only when someone opens the join screen, cached for 20 s.
+let lanCache = null, lanAt = 0, lanBusy = null;
+export function lanStations(port = 80) {
+  if (lanCache && Date.now() - lanAt < 20000) return Promise.resolve(lanCache);
+  if (lanBusy) return lanBusy;
+  const mine = new Set(addresses(true).ips);
+  const targets = [];
+  for (const ip of mine) {
+    const base = ip.split('.').slice(0, 3).join('.');
+    for (let k = 1; k < 255; k++) { const t = `${base}.${k}`; if (!mine.has(t)) targets.push(t); }
+  }
+  const found = [];
+  const probe = async ip => {
+    try {
+      const r = await fetch(`http://${ip}:${port}/api/status`, { signal: AbortSignal.timeout(700) });
+      const s = await r.json();
+      if (s && s.ok && s.version) found.push({ ip, name: s.name || ip, version: s.version, playing: !!s.playing });
+    } catch {}
+  };
+  lanBusy = (async () => {
+    for (let i = 0; i < targets.length; i += 48) await Promise.all(targets.slice(i, i + 48).map(probe));
+    lanCache = found.sort((a, b) => a.name.localeCompare(b.name));
+    lanAt = Date.now();
+    lanBusy = null;
+    return lanCache;
+  })();
+  return lanBusy;
+}

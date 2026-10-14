@@ -100,6 +100,7 @@ export class Game {
       this.ev({ e: 'kill', p: d.owner, z: d.i, head: d.head, how: d.how, type: T.id, x: d.x, zz: d.z });
       if (T.explode) this.explode(d.x, 1.0, d.z, T.explode.radius, T.explode.zdmg, d.owner, 'exploder', T.explode.dmg);
     }
+    this._bleed();
     for (let k = this._scored || 0; k < this.events.length; k++) this.mode.onEvent?.(this.events[k]);
     this._scored = this.events.length;
     this.mode.step(dt);
@@ -176,6 +177,37 @@ export class Game {
       }
     }
     this.ev({ e: 'boom', x, y, z, r, kind });
+  }
+
+  // ------------------------------------------------------------- co-op
+  // Hold X by a downed teammate to get them up (Second Wind halves it);
+  // left alone they bleed out after 30 s.
+  reviveTarget(P) {
+    if (this.players.length < 2) return null;
+    for (const Q of this.players) {
+      if (Q !== P && Q.down && !Q.dead && Math.hypot(Q.x - P.x, Q.z - P.z) < 1.7) {
+        return { kind: 'revive', seat: Q.seat, label: `Hold to revive ${Q.name}`, afford: true, hold: true };
+      }
+    }
+    return null;
+  }
+  reviveStep(P, t, dt) {
+    const Q = this.players[t.seat];
+    if (!Q?.down || Q.dead) return;
+    const need = P.perks.has('secondwind') ? 1.5 : 3;
+    P._reviveT = (P._reviveT || 0) + dt;
+    P.searching = P._reviveT / need;
+    if (P._reviveT < need) return;
+    P._reviveT = 0; P.searching = 0;
+    Q.revive(this, 0.5);
+    P.xp += 50;
+    this.ev({ e: 'revived', p: Q.seat, by: P.seat });
+  }
+  _bleed() {
+    if (this.players.length < 2) return;
+    for (const P of this.players) {
+      if (P.down && !P.dead && P.downT > 30) { P.dead = true; this.ev({ e: 'bledout', p: P.seat }); }
+    }
   }
 
   // Hand the accumulated events to the presentation layer.

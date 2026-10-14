@@ -96,8 +96,12 @@ export class Player {
   step(dt, inp, game) {
     if (this.down) { this.ads = Math.max(0, this.ads - dt * 6); this.downT += dt; return; }
     const W = this.W, wpn = this.weapon;
-    this._look(dt, inp, game);
-    this._move(dt, inp, game);
+    // A co-op player on another screen owns their movement and aim (their
+    // pose arrives with their input; see coop.js).
+    if (!this.remote) {
+      this._look(dt, inp, game);
+      this._move(dt, inp, game);
+    }
 
     // Health regenerates after a few seconds out of harm's way.
     if (game.time - this.lastHurt > REGEN_DELAY && this.hp < this.maxHp) {

@@ -22,6 +22,7 @@ export const tv = {
       });
     return {
       stop() { stopped = true; game?.stop(); },
+      net(m) { game?.net?.(m); },
       rehome(h) {
         const prev = home;
         home = h;

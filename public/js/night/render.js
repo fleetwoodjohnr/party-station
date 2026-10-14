@@ -167,6 +167,68 @@ class Horde {
   }
 }
 
+// ------------------------------------------------------------------ crew
+// Your co-op teammates: same box-body language as the zombies, but upright,
+// in seat-coloured jackets and caps, gun up at their aim; lying down when
+// they're down. Six draw calls for up to four survivors.
+const CREW_JACKET = [0x3a6ea8, 0xc0702a, 0x4a8a3a, 0x8a4aa8];
+class Crew {
+  constructor(scene) {
+    const mat = new THREE.MeshBasicMaterial({ vertexColors: true });
+    const mk = (geo, n) => { const m = new THREE.InstancedMesh(geo, mat, n); m.count = 0; m.frustumCulled = false; m.setColorAt(0, new THREE.Color()); scene.add(m); return m; };
+    this.torso = mk(partGeo(0.46, 0.62, 0.27, false), 4);
+    this.head = mk(partGeo(0.28, 0.3, 0.28, false), 4);
+    this.cap = mk(partGeo(0.32, 0.08, 0.34, false), 4);
+    this.arm = mk(partGeo(0.12, 0.62, 0.12, true), 8);
+    this.leg = mk(partGeo(0.16, 0.8, 0.17, true), 8);
+    this.gun = mk(partGeo(0.08, 0.1, 0.6, false), 4);
+    this.parts = [this.torso, this.head, this.cap, this.arm, this.leg, this.gun];
+    this.m = new THREE.Matrix4(); this.root = new THREE.Matrix4(); this.loc = new THREE.Matrix4();
+    this.q = new THREE.Quaternion(); this.e = new THREE.Euler(); this.v = new THREE.Vector3(); this.sc = new THREE.Vector3();
+    this.c = new THREE.Color();
+    this.jackets = CREW_JACKET.map(lin);
+    this.skin = lin(0xd8a888); this.pants = lin(0x2a2c34); this.dark = lin(0x1c1d22);
+  }
+  _put(mesh, idx, x, y, z, rx, ry, rz, s = 1) {
+    this.e.set(rx, ry, rz, 'YXZ'); this.q.setFromEuler(this.e);
+    this.loc.compose(this.v.set(x, y, z), this.q, this.sc.set(s, s, s));
+    this.m.multiplyMatrices(this.root, this.loc);
+    mesh.setMatrixAt(idx, this.m);
+  }
+  update(players, skip) {
+    let k = 0;
+    for (const P of players || []) {
+      if (!P || P.seat === skip) continue;
+      // Body faces where they look (yaw 0 = -z; the body's forward is +z).
+      this.e.set(P.down ? -1.45 : 0, P.yaw + Math.PI, 0, 'YXZ'); this.q.setFromEuler(this.e);
+      const crouch = P.crouched && !P.down ? 0.35 : 0;
+      this.root.compose(this.v.set(P.x, P.y + (P.down ? 0.25 : 0) - crouch, P.z), this.q, this.sc.set(1, 1, 1));
+      const sw = Math.sin(P.stepPhase || 0) * 0.6 * (P.speedFrac || 0) * 1.6;
+      this._put(this.leg, k * 2, -0.11, 0.8, 0, sw, 0, 0);
+      this._put(this.leg, k * 2 + 1, 0.11, 0.8, 0, -sw, 0, 0);
+      this._put(this.torso, k, 0, 0.8, 0, 0.05, 0, 0);
+      const aim = -1.5 - (P.pitch || 0);
+      this._put(this.arm, k * 2, -0.27, 1.38, 0.02, aim, 0, 0.25);
+      this._put(this.arm, k * 2 + 1, 0.27, 1.38, 0.02, aim, 0, -0.25);
+      this._put(this.head, k, 0, 1.42, 0, -(P.pitch || 0) * 0.6, 0, 0);
+      this._put(this.cap, k, 0, 1.73, 0.04, -(P.pitch || 0) * 0.6, 0, 0);
+      this._put(this.gun, k, 0, 1.3 + Math.sin(P.pitch || 0) * 0.3, 0.45, -(P.pitch || 0), 0, 0);
+      const jacket = this.jackets[P.seat % 4];
+      this.torso.setColorAt(k, jacket); this.cap.setColorAt(k, jacket);
+      this.head.setColorAt(k, this.skin);
+      this.arm.setColorAt(k * 2, jacket); this.arm.setColorAt(k * 2 + 1, jacket);
+      this.leg.setColorAt(k * 2, this.pants); this.leg.setColorAt(k * 2 + 1, this.pants);
+      this.gun.setColorAt(k, this.dark);
+      k++;
+    }
+    for (const m of this.parts) {
+      m.count = (m === this.arm || m === this.leg) ? k * 2 : k;
+      if (k) { m.instanceMatrix.needsUpdate = true; m.instanceColor.needsUpdate = true; }
+    }
+  }
+  dispose(scene) { for (const m of this.parts) { scene.remove(m); m.geometry.dispose(); } }
+}
+
 // ---------------------------------------------------------------- boards
 class Boards {
   constructor(scene, world) {
@@ -366,6 +428,9 @@ export class View {
     this.camera.updateProjectionMatrix();
     this.horde = new Horde(this.scene, pool);
     torchable(this.horde.torso.material);
+    this.crew?.dispose(this.scene);
+    this.crew = new Crew(this.scene);
+    this.crewPlayers = null; this.crewSkip = -1;
     this.boards = new Boards(this.scene, world);
   }
 
@@ -433,6 +498,7 @@ export class View {
   render(now) {
     this.streamer?.update(this.camera.position.x, this.camera.position.z);
     const live = this.horde.update(now);
+    this.crew.update(this.crewPlayers, this.crewSkip);
     this.boards.update();
     for (const [id, m] of Object.entries(this.doors)) m.visible = !this.world.doors[id].open;
     const r = this.renderer;

@@ -10,4 +10,9 @@ export const meta = {
   minPlayers: 1, maxPlayers: 4,
   bots: false,       // AI seats make no sense in a shooter — the lobby hides "add bot"
   needsPad: true,    // played with a controller; phones spectate
+  onePerScreen: true, // co-op is one player per TV/browser (no split-screen)
+  options: [{
+    key: 'coopLoot', label: 'Co-op supplies (Open World / Shelter)', type: 'select', def: 'own',
+    choices: [{ v: 'own', label: 'Everyone keeps their own pack' }, { v: 'shared', label: 'One shared pack' }],
+  }],
 };

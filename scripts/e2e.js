@@ -201,6 +201,46 @@ ok('cleanup done');
     ok('profiles round-trip (corruption check skipped: server runs from another tree)');
   }
   if ((await fetch(`${BASE}/api/profiles/hearts/x`)).status !== 404) throw new Error('profiles open to non-relay games');
+
+  // Co-op across two screens: one player per TV, the host's TV simulates,
+  // a screen may only drive its own seat, and only the host may publish.
+  const tv2 = client('tv');
+  const relayed = { tv: [], tv2: [] };
+  tv.ws.on('message', raw => { const m = JSON.parse(raw); if (m.t?.startsWith('relay')) relayed.tv.push(m); });
+  tv2.ws.on('message', raw => { const m = JSON.parse(raw); if (m.t?.startsWith('relay')) relayed.tv2.push(m); });
+  await waitFor(tv2, s => s.phase === 'hub');
+  tv.send({ t: 'padHello', pad: 0, name: 'Hostie' });
+  tv2.send({ t: 'padHello', pad: 0, name: 'Guest' });
+  tv.send({ t: 'padHello', pad: 1, name: 'Couch' });
+  await waitFor(tv, s => s.pads?.[0] && s.pads?.[1]);
+  await waitFor(tv2, s => s.pads?.[0]);
+  tv.send({ t: 'padMsg', pad: 0, m: { t: 'openLobby', gameId: 'deadofnight' } });
+  await waitFor(tv, s => s.phase === 'lobby');
+  tv2.send({ t: 'padMsg', pad: 0, m: { t: 'joinLobby' } });
+  tv.send({ t: 'padMsg', pad: 1, m: { t: 'joinLobby' } });
+  await waitFor(tv, s => s.lobby?.seats.length === 2);
+  await sleep(150);
+  if (tv.sync.lobby.seats.length !== 2) throw new Error('a second pad on the same screen joined');
+  tv.send({ t: 'padMsg', pad: 0, m: { t: 'start' } });
+  const g1 = await waitFor(tv, s => s.phase === 'game');
+  const g2 = await waitFor(tv2, s => s.phase === 'game');
+  if (g1.game.sim !== true || g2.game.sim !== false) throw new Error(`sim flags wrong: host ${g1.game.sim}, guest ${g2.game.sim}`);
+  const guestSeat = g2.pads[0].seat;
+  tv2.send({ t: 'relayInput', seat: guestSeat, d: { i: 1 } });
+  tv2.send({ t: 'relayInput', seat: 1 - guestSeat, d: { i: 99 } });  // not theirs
+  tv2.send({ t: 'relayState', d: { forged: true } });                // not the host
+  tv.send({ t: 'relayState', d: { t: 1 } });
+  await sleep(250);
+  if (!relayed.tv.some(m => m.t === 'relayInput' && m.seat === guestSeat && m.d.i === 1)) throw new Error('guest input not relayed to the host');
+  if (relayed.tv.some(m => m.d?.i === 99)) throw new Error('a screen drove someone else\'s seat');
+  if (relayed.tv.some(m => m.t === 'relayState')) throw new Error('a guest published a snapshot');
+  if (!relayed.tv2.some(m => m.t === 'relayState' && m.d.t === 1)) throw new Error('host snapshot not relayed');
+  tv.send({ t: 'relayQuit' });
+  await waitFor(tv2, s => s.phase === 'hub');
+  for (const p of [0, 1]) tv.send({ t: 'padBye', pad: p });
+  tv2.send({ t: 'padBye', pad: 0 });
+  tv2.ws.close();
+  ok('co-op relay: one player per screen, host simulates, seats are owner-only, only the host publishes');
 }
 
 // Cabinet (RetroArch) flow — runs only when the server sees an emulator

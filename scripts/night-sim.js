@@ -13,6 +13,7 @@ import { ZTYPES, S as ZS } from '../public/js/night/sim/zombies.js';
 import { generateWorld } from '../public/js/night/sim/regions.js';
 import { DAY_SECS, MISSIONS } from '../public/js/night/sim/survival.js';
 import { PIECES as PIECESx } from '../public/js/night/sim/shelter.js';
+import { HostNet, ClientNet, applyAct } from '../public/js/night/coop.js';
 
 let passed = 0;
 const ok = label => { passed++; console.log(`✓ ${label}`); };
@@ -487,6 +488,58 @@ const shGame = (seed = 9, save = null) => new Game({ world: new World(generateWo
   assert.equal(g2.world.cell(tx, tz), C.STRUCT);
   assert.equal(g2.mode.shelter.tech, 3);
   ok(`turrets need fuel and ammo; crafting (ammo, Workshop III); a dusk raid of ${Sh.raid?.n ?? '—'} arrives; ${pieces} pieces survive save/load`);
+}
+
+// ---------------------------------------------------------------- phase 6
+{ // co-op: host + client wired in memory
+  const seats = [{ name: 'Ana' }, { name: 'Bo' }];
+  const hostG = new Game({ world: new World(DINER), seats, seed: 3 });
+  const cliG = new Game({ world: new World(DINER), seats, seed: 3 });
+  const toClient = [], toHost = [];
+  const host = new HostNet(hostG, (t, seat, d) => toClient.push({ t, seat, d: JSON.parse(JSON.stringify(d)) }));
+  host.meta = { kind: 'classic', seed: 3, run: 'x' };
+  const cli = new ClientNet(cliG, 1, (t, seat, d) => toHost.push({ t, seat, d: JSON.parse(JSON.stringify(d)) }));
+  const Ph = hostG.players, Pc = cliG.players[1];
+  Ph.forEach(P => { P.god = true; });
+  const frame = (cliInput, hostLocal = emptyInput()) => {
+    for (const m of toClient.splice(0)) cli.onMsg(m);
+    cli.apply(performance.now());
+    Pc.step(DT, cliInput, cliG); cli.sendInput(cliInput, Pc, DT); cliG.drain();
+    for (const m of toHost.splice(0)) host.onMsg({ t: m.t, seat: m.seat, d: m.d });
+    hostG.step(DT, [hostLocal, host.inputFor(1)]);
+    host.collect(hostG.drain()); host.tick(DT);
+  };
+  // Bo walks forward on his screen; the host sees him move.
+  const startZ = Ph[1].z;
+  for (let k = 0; k < 60; k++) { const i = emptyInput(); i.my = -1; frame(i); }
+  assert.ok(Math.abs(Ph[1].z - startZ) > 1, `host didn't see the client move (${Ph[1].z} vs ${startZ})`);
+  assert.ok(cli.ready, 'client never got a snapshot');
+  // A zombie on the host shows up on the client.
+  const zi = hostG.zombies.spawn(ZT.walker, Ph[1].x, Ph[1].z + 4, 9999, 0.01, 0.5, { rise: false }); // behind him, inside the diner
+  for (let k = 0; k < 10; k++) frame(emptyInput());
+  await new Promise(r => setTimeout(r, 150));
+  frame(emptyInput());
+  assert.ok(cliG.zombies.state[zi] !== 0 && Math.abs(cliG.zombies.x[zi] - hostG.zombies.x[zi]) < 0.5, 'zombie not mirrored on the client');
+  // Bo shoots it: the host resolves the hit.
+  Pc.yaw = Math.atan2(-(hostG.zombies.x[zi] - Pc.x), -(hostG.zombies.z[zi] - Pc.z)); Pc.pitch = 0;
+  const hp0 = hostG.zombies.hp[zi], shots0 = Ph[1].shots;
+  for (let k = 0; k < 20; k++) { const i = emptyInput(); i.fire = true; i.firePressed = k % 4 === 0; i.ads = true; i.assist = 'off'; frame(i); }
+  assert.ok(Ph[1].shots > shots0 && hostG.zombies.hp[zi] < hp0, 'client shots did not land on the host');
+  hostG.zombies.clear();
+  // Bo goes down; Ana revives him.
+  Ph[1].god = false; Ph[1].hurt(9999, hostG);
+  assert.ok(Ph[1].down);
+  Ph[0].x = Ph[1].x + 1; Ph[0].z = Ph[1].z;
+  for (let k = 0; k < 120 && Ph[1].down; k++) { const i = emptyInput(); i.x = true; frame(emptyInput(), i); }
+  assert.ok(!Ph[1].down, 'revive failed');
+  for (let k = 0; k < 10; k++) frame(emptyInput());
+  await new Promise(r => setTimeout(r, 150));
+  frame(emptyInput());
+  assert.ok(!Pc.down, 'client still thinks it is down');
+  // A remote action (the Forge) runs on the host for that player only.
+  Ph[1].points = 6000;
+  assert.ok(applyAct(hostG, Ph[1], { a: 'forge' }) && Ph[1].weapon.tier === 1 && Ph[0].weapon.tier === 0);
+  ok('co-op: client movement reaches the host, zombies mirror, client shots resolve on the host, revive, per-player actions');
 }
 
 console.log(`\nAll ${passed} Dead of Night sim checks passed.`);

@@ -116,15 +116,15 @@ function statsPanel(P) {
     h('div', { style: 'margin-top:.6em;color:#ffe08a' }, `Your points: ${P.points.toLocaleString()}`));
 }
 
-export function forgeScreen(app, stack, game, P, onChange) {
+export function forgeScreen(app, stack, game, P, onChange, act = d => (d.a === 'forge' ? game.mode.forgeUpgrade(P) : game.mode.gunsmith(P, d.slot, d.att))) {
   const mode = game.mode, w = P.weapon;
   const next = RARITY[w.tier + 1];
-  const reopen = () => { stack.pop(); stack.push(forgeScreen(app, stack, game, P, onChange)); };
+  const reopen = () => { stack.pop(); stack.push(forgeScreen(app, stack, game, P, onChange, act)); };
   const items = [{
     label: next ? `Forge to ${next.name}` : 'Fully forged',
     sub: next ? `+${Math.round((next.dmg / RARITY[w.tier].dmg - 1) * 100)}% damage, full ammo — ${mode.constructor.FORGE_COST}` : 'Nothing left to temper',
     disabled: !next || P.points < mode.constructor.FORGE_COST,
-    act: () => { if (mode.forgeUpgrade(P)) { onChange(); reopen(); } },
+    act: () => { if (act({ a: 'forge' })) { onChange(); stack.pop(); } },
   }];
   for (const slot of SLOTS) {
     const opts = Object.keys(ATTACHMENTS).filter(a => ATTACHMENTS[a].slot === slot && canFit(w.id, a));
@@ -140,7 +140,7 @@ export function forgeScreen(app, stack, game, P, onChange) {
       label: o.name,
       val: () => ((w.att[slot] || null) === o.id ? 'Fitted' : o.rank > mode.rank ? `Rank ${o.rank}` : `${mode.constructor.GUNSMITH_COST}`),
       disabled: o.rank > mode.rank || (w.att[slot] || null) === o.id || P.points < mode.constructor.GUNSMITH_COST,
-      act: () => { if (mode.gunsmith(P, slot, o.id)) { onChange(); stack.pop(); reopen(); } },
+      act: () => { if (act({ a: 'gunsmith', slot, att: o.id })) { onChange(); stack.pop(); reopen(); } },
     }));
     list.push({ label: 'Back', act: () => stack.pop() });
     return screen(SLOT_NAMES[slot], list, stack, null, () => statsPanel(P));

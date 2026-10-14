@@ -41,6 +41,8 @@ const net = connect({
     if (m.t === 'toast') { toast(m.text); sfx.toast(); }
     if (m.t === 'nope') { toast(m.text, true); sfx.nope(); }
     if (m.t === 'input' && relaySim?.input) relaySim.input(m.seat, m.d);
+    // Co-op relay traffic for immersive games (snapshots, remote inputs).
+    if ((m.t === 'relayState' || m.t === 'relayInput' || m.t === 'relayAct') && relaySim?.net) relaySim.net(m);
   },
 });
 
@@ -173,12 +175,24 @@ function padHub(pad, btn) {
       tvMode = modes[chooseIdx];
       hubCursor = 0;
       if (tvMode === 'settings') openSettings();
+      if (tvMode === 'join') openJoin();
+      if (tvMode === 'home') { goTo(`${HOME_URL}/tv`); tvMode = null; }
       sfx.select();
     }
     render();
     return;
   }
   if (tvMode === 'settings') return padSettings(btn);
+  if (tvMode === 'join') {
+    const n = lan.list?.length || 0;
+    if (btn === 'b') { tvMode = null; sfx.back(); }
+    else if ((btn === 'up' || btn === 'left') && n) { lan.idx = (lan.idx + n - 1) % n; sfx.blip(); }
+    else if ((btn === 'down' || btn === 'right') && n) { lan.idx = (lan.idx + 1) % n; sfx.blip(); }
+    else if (btn === 'x') openJoin();
+    else if (btn === 'a' && n) { sfx.select(); goTo(`http://${lan.list[lan.idx].ip}/tv?home=${encodeURIComponent(location.origin)}`); }
+    render();
+    return;
+  }
   if (btn === 'b') { tvMode = null; sfx.back(); render(); return; }
   const groups = hubGroups();
   const list = groups.flat();
@@ -231,7 +245,17 @@ const cfg = {
   busy: '', note: '', osk: null, target: null, loading: false,
 };
 
-const chooseModes = () => ['party', 'retro', 'settings'];
+// Co-op across stations: this TV can visit a friend's station (its page,
+// its server) and come back. ?home= carries the way back.
+const HOME_URL = new URLSearchParams(location.search).get('home');
+const chooseModes = () => (HOME_URL ? ['party', 'retro', 'home'] : ['party', 'retro', 'settings', 'join']);
+const lan = { list: null, idx: 0, busy: false };
+function openJoin() {
+  Object.assign(lan, { list: null, idx: 0, busy: true });
+  fetch('/api/lan').then(r => r.json()).then(d => { lan.list = d.stations || []; }).catch(() => { lan.list = []; })
+    .finally(() => { lan.busy = false; render(); });
+}
+function goTo(url) { toast('Heading over…'); location.href = url; }
 
 function openSettings() {
   Object.assign(cfg, { view: 'menu', idx: 0, nets: null, note: '', osk: null, target: null });
@@ -722,6 +746,7 @@ function hubScreen() {
   disposeScene();
   if (tvMode === null) return chooseScreen();
   if (tvMode === 'settings') return settingsScreen();
+  if (tvMode === 'join') return joinScreen();
   if (tvMode === 'retro') return retroHubScreen();
   let i = 0; // running index across shelves — matches hubCursor
   return h('div', { class: 'tv-stage' },
@@ -760,6 +785,25 @@ function partySub() {
   return cats.length > 1 ? `${cats.join(' & ')} — phones and controllers` : `${cats[0] || 'Card games'} — phones and controllers`;
 }
 
+// Other stations on the network: pick one and this TV becomes a screen of
+// theirs (its controllers join their lobby — co-op Dead of Night).
+function joinScreen() {
+  const list = lan.list;
+  return h('div', { class: 'tv-stage' },
+    h('div', { class: 'tv-top' }, wordmark(44), urlBox()),
+    h('div', { class: 'tv-main' }, h('div', { class: 'center' },
+      h('div', { class: 'tv-big', style: 'font-size:44px;margin-bottom:20px' }, '🤝 Join a friend’s station'),
+      lan.busy || !list ? h('p', { class: 'dim', style: 'font-size:22px' }, 'Looking around the network…')
+        : !list.length ? h('p', { class: 'dim', style: 'font-size:22px' }, 'No other Party Stations found on this network.')
+          : h('div', { class: 'row', style: 'gap:22px;justify-content:center;flex-wrap:wrap' }, list.map((st, i) =>
+            h('div', { class: 'game-tile cat-action' + (i === lan.idx ? ' tv-focus' : ''), style: 'width:300px;min-height:150px;align-items:center;justify-content:center;text-align:center' },
+              h('div', { class: 'g-name', style: 'font-size:24px' }, st.name),
+              h('div', { class: 'g-sub', style: 'font-size:15px' }, `${st.ip}${st.playing ? ' · in a game' : ''}`)))),
+      h('p', { class: 'dim', style: 'font-size:17px;margin-top:22px' }, 'Your controllers will play on their station. Pick 🏠 on their chooser to come home.'))),
+    hintBar([['🎮 A', 'join'], ['🎮 X', 'search again'], ['🎮 B', 'back']]),
+  );
+}
+
 // Landing chooser: the console's first screen — retro classics or party games?
 function chooseScreen() {
   const emuGames = (sync.emu?.systems || []).reduce((n, s) => n + s.games.length, 0);
@@ -769,11 +813,18 @@ function chooseScreen() {
       icon: () => arcadeIcon(76), name: 'Retro Games', cls: 'cat-arcade', mode: 'retro',
       sub: sync.emu?.available ? `${emuGames} classics on the emulator` : `Add ROMs at http://${joinHost()}/roms`,
     },
-    {
+    HOME_URL ? {
+      icon: () => h('span', { style: 'font-size:76px;line-height:1.2' }, '🏠'),
+      name: 'Back to my station', cls: 'cat-board', mode: 'home', sub: 'Leave this station',
+    } : {
       icon: () => h('span', { style: 'font-size:76px;line-height:1.2' }, '⚙️'),
       name: 'Settings', cls: 'cat-board', mode: 'settings',
       sub: 'Wi-Fi and display',
     },
+    ...(HOME_URL ? [] : [{
+      icon: () => h('span', { style: 'font-size:76px;line-height:1.2' }, '🤝'),
+      name: 'Join a friend', cls: 'cat-action', mode: 'join', sub: 'Co-op on another Party Station',
+    }]),
   ];
   return h('div', { class: 'tv-stage' },
     h('div', { class: 'tv-top' }, wordmark(44), urlBox()),
@@ -892,6 +943,13 @@ function gamepadForSeat(seat) {
   return [...all].find(gp => gp && gp.connected && !busy.has(gp.index)) || null;
 }
 
+// Seats whose controllers are plugged into this screen.
+function localSeats() {
+  const out = [];
+  for (const info of Object.values(sync?.pads || {})) if (info.seat >= 0) out.push(info.seat);
+  return out.sort((a, b) => a - b);
+}
+
 function gameScreen() {
   const G = sync.game;
   const g = sync.games.find(x => x.id === G.gameId);
@@ -929,6 +987,11 @@ function gameScreen() {
             sendScore: d => net.send({ t: 'relayScore', d }),
             // Raw analog access for games that need sticks and triggers.
             gamepad: seat => gamepadForSeat(seat),
+            // Co-op: does this screen run the game, which seats play here,
+            // and a pipe to the other screens (via the server).
+            sim: G.sim !== false,
+            localSeats: () => localSeats(),
+            send: (t, seat, d) => net.send({ t, seat, d }),
             // Straight back to the hub (an immersive game's own "Quit").
             quit: () => net.send({ t: 'relayQuit' }),
           });

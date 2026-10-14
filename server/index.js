@@ -109,8 +109,12 @@ app.post('/api/bench', (req, res) => {
   if (r.err) res.status(409).json({ ok: false, err: r.err });
   else { perf.resetRun(); res.json(r); }
 });
+// Other stations on this network (co-op "Join a friend" on the TV).
+app.get('/api/lan', async (_req, res) => res.json({ stations: await hostinfo.lanStations() }));
 app.get('/api/status', (_req, res) => res.json({
   ok: true,
+  name: os.hostname(),
+  playing: !isIdle(),
   version: updater.status.version,
   updateAvailable: updater.status.updateAvailable,
   updating: updater.status.updating,

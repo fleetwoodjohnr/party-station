@@ -43,6 +43,9 @@ const CSS = `
 .nn-boss .bar{height:.55em;margin-top:.3em;background:rgba(0,0,0,.6);border:1px solid #6a2a24;border-radius:.3em;overflow:hidden}
 .nn-boss .bar i{display:block;height:100%;background:linear-gradient(90deg,#a3141c,#ff4a3a)}
 .nn-timers{position:absolute;left:50%;top:9vh;transform:translateX(-50%);display:flex;gap:1.2em;font-weight:900;text-shadow:0 2px 0 #000}
+.nn-team{position:absolute;left:3vw;top:24vh;font-size:.8em;font-weight:800;text-shadow:0 2px 0 #000}
+.nn-team div{margin-bottom:.35em}.nn-team i{display:block;width:9vw;height:.35em;background:rgba(0,0,0,.5);border-radius:.2em;overflow:hidden;margin-top:.15em}
+.nn-team b{display:block;height:100%}
 .nn-scope{position:absolute;inset:0;display:none;background:radial-gradient(circle at center,transparent 0 31vh,#000 31.3vh)}
 .nn-scope:before,.nn-scope:after{content:'';position:absolute;background:#000}
 .nn-scope:before{left:50%;top:19vh;bottom:19vh;width:2px;margin-left:-1px}.nn-scope:after{top:50%;left:calc(50% - 31vh);right:calc(50% - 31vh);height:2px;margin-top:-1px}
@@ -70,14 +73,26 @@ export class Hud {
     this.boss = h('div', { class: 'nn-boss' }, 'THE WARDEN', h('div', { class: 'bar' }, this.bossFill = h('i')));
     this.timers = h('div', { class: 'nn-timers' });
     this.scope = h('div', { class: 'nn-scope' });
+    this.teamEl = h('div', { class: 'nn-team' });
     this.root = h('div', { class: 'nn-hud' }, this.scope, this.vign, this.x, this.hit, this.round, this.hpbar, this.pts,
-      this.perks, this.ammo, this.equip, this.prompt, this.banner, this.note, this.obj, this.boss, this.timers);
+      this.perks, this.ammo, this.equip, this.prompt, this.banner, this.note, this.obj, this.boss, this.timers, this.teamEl);
     layer.appendChild(this.root);
     this.last = {};
     this.hitT = 0;
   }
 
   _set(key, val, fn) { if (this.last[key] !== val) { this.last[key] = val; fn(val); } }
+
+  // Co-op teammates: name, health, and a bleed-out clock when they're down.
+  team(players, mine) {
+    const COLS = ['#5a9ee8', '#ff9a4a', '#6ac85a', '#b77ae8'];
+    const key = players.map(P => `${P.name}|${Math.round(P.hp / 5)}|${P.down ? Math.ceil(30 - P.downT) : ''}|${P.dead}`).join(';');
+    this._set('team', key, () => {
+      this.teamEl.replaceChildren(...players.filter(P => P.seat !== mine).map(P => h('div', { style: `color:${COLS[P.seat % 4]}` },
+        P.dead ? `${P.name} — out` : P.down ? `${P.name} — DOWN ${Math.max(0, Math.ceil(30 - P.downT))}s` : P.name,
+        h('i', {}, h('b', { style: `width:${P.down ? 0 : Math.round(P.hp / P.maxHp * 100)}%;background:${COLS[P.seat % 4]}` })))));
+    });
+  }
 
   flashHit(kill) {
     this.hit.className = 'nn-hit' + (kill ? ' kill' : '');

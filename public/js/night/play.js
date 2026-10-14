@@ -10,6 +10,7 @@ import { DINER } from './sim/maps.js';
 import { generateWorld } from './sim/regions.js';
 import { SurvivalHud, mapScreen, inventoryScreen, buildPanel, benchScreen } from './ow-ui.js';
 import { ShelterView } from './shelter-view.js';
+import { HostNet, ClientNet, applyAct } from './coop.js';
 import { PIECES, PIECE_ORDER, RECIPES, TIER_NAMES } from './sim/shelter.js';
 import { ATTACHMENTS } from './sim/weapons.js';
 import { C } from './sim/world.js';
@@ -42,7 +43,14 @@ export class PlayState {
     const seat = a.ctx.seats?.[0];
     this.career = this.opts.career || { xp: 0 };
     this.rank = rankOf(this.career.xp || 0);
-    const seats = [{ name: seat && !seat.bot ? seat.name : 'Survivor' }];
+    // Co-op: everyone in the lobby is a survivor; this screen plays one of
+    // them. The host's screen simulates, the others are clients.
+    const humans = (a.ctx.seats || []).filter(s => !s.bot);
+    this.coop = !this.opts.autopilot && humans.length > 1;
+    this.isClient = !!this.opts.client;
+    this.localSeat = this.coop ? (a.ctx.localSeats?.()[0] ?? 0) : 0;
+    const seats = this.coop ? humans.map(s => ({ name: s.name })) : [{ name: seat && !seat.bot ? seat.name : 'Survivor' }];
+    let seed = (Math.random() * 1e9) | 0;
     if (this.kind === 'classic') {
       this.world = a.world; this.pool = a.pool;
       this.game = new Game({
@@ -52,20 +60,26 @@ export class PlayState {
       });
     } else {
       // A whole county from its seed (same seed = same map for a save).
-      const save = this.opts.save;
-      const seed = save?.seed ?? ((Math.random() * 1e9) | 0);
+      const save = this.isClient ? null : this.opts.save;
+      seed = this.opts.seed ?? save?.seed ?? seed;
       this.world = new World(generateWorld(seed));
       this.pool = new Zombies(48);
       a.view.setWorld(this.world, this.world, this.pool);
       this.game = new Game({
         world: this.world, zombies: this.pool, mode: this.kind, seats, seed,
-        modeOpts: { seed, save },
+        modeOpts: { seed, save, sharedLoot: a.ctx.options?.coopLoot === 'shared' },
       });
       this.slot = this.opts.slot || 1;
       this.flash = false;
     }
-    const P = this.P = this.game.players[0];
+    const P = this.P = this.game.players[this.localSeat] || this.game.players[0];
     this.home = [P.x, P.z];
+    if (this.coop && !this.isClient) {
+      this.host = new HostNet(this.game, a.ctx.send);
+      this.host.meta = { kind: this.kind, seed, run: Math.random().toString(36).slice(2, 8), standard: !!this.opts.standard };
+    }
+    if (this.isClient) { this.net = new ClientNet(this.game, this.localSeat, a.ctx.send); this.meta = this.opts.meta; }
+    a.view.crewPlayers = this.game.players; a.view.crewSkip = P.seat;
     if (this.opts.autopilot) {
       P.god = true; P.infiniteAmmo = true;
       P.give('smg', null); P.give('shotgun', null);
@@ -138,6 +152,44 @@ export class PlayState {
     this.app.view.setViewmodel(this._vmGroup);
   }
 
+  // Menu actions: done here on the host, sent to the host from a client.
+  doAct(d) {
+    if (this.net) { this.net.act(d); return true; }
+    return applyAct(this.game, this.P, d);
+  }
+
+  // Remote traffic (via tv.js → main.js).
+  onNet(m) {
+    if (this.host) this.host.onMsg(m);
+    if (this.net) {
+      const meta = m.d?.meta;
+      if (meta && this.meta && meta.run !== this.meta.run) { this.app.startClient(meta); return; }
+      this.net.onMsg(m);
+    }
+  }
+
+  // One co-op frame: the host steps everyone (remote players from their
+  // packets), the client only predicts its own survivor.
+  coopStep(dt, now, inp) {
+    const g = this.game, clear = i => ({ ...i, firePressed: false, jump: false, crouch: false, sprint: false, xPressed: false, swap: false, melee: false, lethal: false, tactical: false, heal: false, lookX: 0, lookY: 0 });
+    if (this.net) {
+      this.net.apply(now);
+      let left = Math.min(dt, 0.1), i = inp;
+      while (left > 1e-4) { const h2 = Math.min(left, 1 / 30); this.P.step(h2, i, g); left -= h2; i = clear(i); }
+      this.net.sendInput(inp, this.P, dt);
+      this.handle([...g.drain(), ...this.net.drainEvents()]);
+      return;
+    }
+    this.host.drainActs((seat, d) => applyAct(g, g.players[seat], d));
+    let inputs = g.players.map((Q, k) => (k === this.localSeat ? inp : this.host.inputFor(k)));
+    let left = Math.min(dt, 0.1);
+    while (left > 1e-4) { const h2 = Math.min(left, 1 / 30); g.step(h2, inputs); left -= h2; inputs = inputs.map(clear); }
+    const ev = g.drain();
+    this.host.collect(ev);
+    this.host.tick(dt);
+    this.handle(ev);
+  }
+
   sendScore() {
     const P = this.P;
     this.app.ctx.sendScore?.({ text: `🧟 Round ${this.game.mode.round || 1} · ${P.points} pts · ${P.kills} kills` });
@@ -175,15 +227,19 @@ export class PlayState {
       this.lostT += dt;
       if (this.lostT > 0.5 && !this.menus.open) this.openPause(true);
     } else this.lostT = 0;
+    if (this.net && !this.net.ready) { this.hud.showNote('Joining the host’s game…', 0.5); return; }
     if (this.menus.open) {
       this.menus.handle();
-      if (a.state === this) this.pose(dt, now, 0, 0);
+      if (a.state !== this) return;
+      // Menus don't stop a shared game.
+      if (this.coop && this.overT < 0) this.coopStep(dt, now, emptyInput());
+      this.pose(dt, now, 0, 0);
       return;
     }
     if (this.overT >= 0) {
       this.overT += dt;
-      g.step(Math.min(dt, 1 / 30), []); // the horde keeps feeding behind the death cam
-      this.handle(g.drain());
+      if (this.coop) this.coopStep(dt, now, emptyInput());
+      else { g.step(Math.min(dt, 1 / 30), []); this.handle(g.drain()); } // the horde keeps feeding behind the death cam
       this.pose(dt, now, 0, 0);
       if (this.overT > 3 && !this.menus.open) this.endScreen(this.won);
       return;
@@ -192,7 +248,7 @@ export class PlayState {
     if (this.sv) {
       // Survival extras: map (Select), pack (D-pad up), torch (D-pad right).
       if (I.pressed('map')) { this.menus.push(mapScreen(a, this.menus, g)); return; }
-      if (I.pressed('inv')) { this.menus.push(inventoryScreen(a, this.menus, g, P, () => this.vmFor())); return; }
+      if (I.pressed('inv')) { this.menus.push(inventoryScreen(a, this.menus, g, P, () => this.vmFor(), d => this.doAct(d))); return; }
       if (I.pressed('dright')) { this.flash = !this.flash; this.flashSet = true; audio.ui('blip'); }
       if (this.shv) this.buildStep(I);
       const [day, dusk] = g.mode.daylight();
@@ -203,22 +259,26 @@ export class PlayState {
     g.zcap = a.gov.cap;
     let inp = this.opts.autopilot ? botInput(g, P, this.home) : this.readInput(dt);
     const look = [inp.lookX / Math.max(dt, 1e-3), inp.lookY / Math.max(dt, 1e-3)];
-    // Fixed-size substeps keep physics stable on a slow frame; edge-
-    // triggered buttons only count once.
-    let left = Math.min(dt, 0.1);
-    while (left > 1e-4) {
-      const h2 = Math.min(left, 1 / 30);
-      g.step(h2, [inp]);
-      left -= h2;
-      inp = { ...inp, firePressed: false, jump: false, crouch: false, sprint: false, xPressed: false, swap: false, melee: false, lethal: false, tactical: false, lookX: 0, lookY: 0 };
+    if (this.coop) this.coopStep(dt, now, inp);
+    else {
+      // Fixed-size substeps keep physics stable on a slow frame; edge-
+      // triggered buttons only count once.
+      let left = Math.min(dt, 0.1);
+      while (left > 1e-4) {
+        const h2 = Math.min(left, 1 / 30);
+        g.step(h2, [inp]);
+        left -= h2;
+        inp = { ...inp, firePressed: false, jump: false, crouch: false, sprint: false, xPressed: false, swap: false, melee: false, lethal: false, tactical: false, heal: false, lookX: 0, lookY: 0 };
+      }
+      this.handle(g.drain());
     }
-    this.handle(g.drain());
     if (a.state !== this) return;
     this.vmFor();
     const scoped = this.vm.def.scope && P.ads > 0.85;
     this.hud.update(dt, P, g, a.view.res.h, a.view.camera.fov * Math.PI / 180, scoped);
     if (this.sv) this.sv.update(P, g.mode);
     else this.hud.objectives(I.down('map') && !this.opts.autopilot, g.mode);
+    if (this.coop) this.hud.team(g.players, P.seat);
     this.pose(dt, now, look[0] * 0.015, look[1] * 0.015);
     // Footsteps.
     const step = Math.floor(P.stepPhase / Math.PI);
@@ -356,7 +416,7 @@ export class PlayState {
         case 'crateTaken': audio.buy(); break;
         case 'openForge':
           if (e.p === P.seat && !this.opts.autopilot) {
-            this.menus.push(forgeScreen(this.app, this.menus, g, P, () => { this.vmFor(); audio.buy(); }));
+            this.menus.push(forgeScreen(this.app, this.menus, g, P, () => { this.vmFor(); audio.buy(); }, d => this.doAct(d)));
           }
           break;
         case 'forged': audio.perk('doubletap'); this.hud.popPoints(e.n); this.hud.showBanner(`${RARITY[e.tier].name}`, 'Forged', 2); break;
@@ -370,6 +430,9 @@ export class PlayState {
           break;
         case 'powerEnd': audio.powerEnd(); break;
         case 'secondwind': this.hud.showBanner('Second Wind', 'Back on your feet', 2.5); break;
+        case 'down': if (this.coop && e.p !== P.seat) { this.hud.showNote(`${g.players[e.p].name} is down — hold X by them to revive!`, 3); audio.denied(); } break;
+        case 'revived': if (e.p === P.seat) this.hud.showBanner('Back up', `${g.players[e.by]?.name || 'A friend'} got you`, 2); else this.hud.showNote(`${g.players[e.p].name} is back up`, 1.5); break;
+        case 'bledout': this.hud.showNote(e.p === P.seat ? 'You bled out — back next round' : `${g.players[e.p].name} bled out`, 3); break;
         case 'weapon': case 'swap': if (e.p === P.seat) { this.vmFor(); audio.swap(); } break;
         case 'reload': if (e.p === P.seat) audio.reload(); break;
         case 'reloaded': if (e.p === P.seat) audio.reloaded(); break;
@@ -419,7 +482,7 @@ export class PlayState {
         case 'stashed': this.hud.showNote('Stashed your materials', 1.5); audio.buy(); break;
         case 'crafted': this.hud.showNote(`Crafted: ${e.name}`, 1.5); audio.hammer(); break;
         case 'openBench':
-          if (e.p === P.seat) this.menus.push(benchScreen(this.app, this.menus, g, P, this.career.xp || 0, () => this.vmFor(), RECIPES, ATTACHMENTS, rankOf));
+          if (e.p === P.seat) this.menus.push(benchScreen(this.app, this.menus, g, P, this.career.xp || 0, () => this.vmFor(), RECIPES, ATTACHMENTS, rankOf, d => this.doAct(d)));
           break;
         case 'raidSoon': this.hud.showBanner('A raid is coming', `They'll hit the farm from ${e.pattern}`, 4); break;
         case 'raid': this.hud.showBanner('Raid!', `${e.n} of them — from ${e.pattern}`, 3); audio.roar(0, 1); break;
@@ -514,8 +577,8 @@ export class PlayState {
     if (T.piece) {
       const p = T.piece, u = Sh.upgradeCost(p);
       this.shv.showGhost(null);
-      if (I.pressed('reload')) Sh.improve(p.id);
-      if (I.pressed('melee')) Sh.demolish(p.id);
+      if (I.pressed('reload')) this.doAct({ a: 'improve', sid: p.id });
+      if (I.pressed('melee')) this.doAct({ a: 'demolish', sid: p.id });
       buildPanel(this.buildEl, I, {
         title: `${p.def.hp.length > 1 ? TIER_NAMES[p.tier] + ' ' : ''}${p.def.name} — ${Math.round(p.hp)}/${p.maxHp}`,
         line: u ? `${u.kind === 'repair' ? 'Repair' : 'Upgrade to ' + TIER_NAMES[p.tier + 1]}: ${fmt(u.need)}` : 'Fully upgraded',
@@ -525,7 +588,7 @@ export class PlayState {
     }
     const why = Sh.canPlace(B.type, T.x, T.z);
     this.shv.showGhost(T.x, T.z, B.type, !why);
-    if (I.pressed('fire')) Sh.place(B.type, T.x, T.z, B.rot);
+    if (I.pressed('fire') && !why) this.doAct({ a: 'place', type: B.type, x: T.x, z: T.z, rot: B.rot });
     const P = this.P;
     const have = Object.keys(D.cost[0]).map(k => `${k} ${(P.inv[k] || 0) + (Sh.stash[k] || 0)}`).join(' · ');
     buildPanel(this.buildEl, I, { title: `${D.name}`, line: `Costs ${fmt(D.cost[0])} — you have ${have}`, why: why || '', power });
@@ -541,7 +604,11 @@ export class PlayState {
       { label: 'Restart', sub: 'Back to round 1', act: async () => { await this.saveStats(this.game.mode.round); a.setState(new PlayState(a, { standard: this.opts.standard, career: this.career })); } },
       { label: 'Quit to Party Station', act: async () => { if (this.sv) await this.saveWorld(); else this.saveStats(this.game.mode.round); a.quit(); } },
     ];
-    if (this.sv) {
+    if (this.coop) {
+      items.splice(3, 1);
+      items.at(-1).label = this.isClient ? 'Leave (ends the game for everyone)' : 'Quit to Party Station (ends it for everyone)';
+    }
+    if (this.sv && !this.isClient) {
       // Survival: no restart; save and leave instead.
       items.splice(3, 1, { label: 'Save', sub: `Slot ${this.slot}`, act: async () => { await this.saveWorld(); this.hud.showNote('Saved', 1.5); this.menus.clear(); } });
     }
@@ -561,7 +628,10 @@ export class PlayState {
   endScreen(won) {
     const a = this.app, P = this.P, g = this.game;
     const survived = won ? g.mode.round : Math.max(0, g.mode.round - 1);
-    const menu = new Menu([
+    const menu = new Menu(this.isClient ? [
+      { label: 'Wait for the host', sub: 'They choose what happens next', act: () => {} },
+      { label: 'Quit to Party Station', act: () => a.quit() },
+    ] : [
       { label: 'Play again', act: () => a.setState(new PlayState(a, { standard: this.opts.standard, career: this.career })) },
       { label: 'Quit to Party Station', act: () => a.quit() },
     ], { onBack: () => a.quit() });
@@ -583,7 +653,7 @@ export class PlayState {
   // Survival: the whole world into its slot, and the XP earned since the
   // last save into the career.
   async saveWorld() {
-    if (!this.sv) return;
+    if (!this.sv || this.isClient) return; // the host's screen owns the save
     const P = this.P;
     const data = this.game.mode.serialize();
     await saveProfile(`${this.kind}-${this.slot}`, data);
@@ -628,6 +698,7 @@ export class PlayState {
     for (const { m } of this.doorSigns) { a.view.scene.remove(m); m.geometry.dispose(); m.material.map?.dispose(); m.material.dispose(); }
     for (const o of [this.fx.parts, this.fx.tracers, this.props.mesh]) { a.view.scene.remove(o); o.geometry.dispose(); o.material.dispose(); }
     a.view.setViewmodel(null);
+    a.view.crewPlayers = null;
     this._vmGroup?.traverse(o => { o.geometry?.dispose(); o.material?.dispose(); });
     this.hudLayer.remove();
     a.uiLayer.replaceChildren();
