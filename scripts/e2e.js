@@ -147,6 +147,62 @@ bob.send({ t: 'deleteSave', gameId: 'hearts' });
 bob.send({ t: 'deleteSave', gameId: 'crazy8s' });
 ok('cleanup done');
 
+// Dead of Night: a relay game the TV simulates. Registered on the hub,
+// controller-hosted, no bots, quits straight to the hub, never benches
+// over a running game; profiles round-trip and survive a corrupt file.
+{
+  const BASE = `http://127.0.0.1:${PORT}`;
+  const don = tv.sync.games.find(g => g.id === 'deadofnight');
+  if (!don || don.mode !== 'relay' || don.bots !== false || don.category !== 'action') {
+    throw new Error('Dead of Night missing from the catalog: ' + JSON.stringify(don));
+  }
+  ok('Dead of Night listed on the hub (relay, action, no bots)');
+  tv.send({ t: 'padHello', pad: 1, name: 'Survivor' });
+  await waitFor(tv, s => s.pads?.[1]);
+  tv.send({ t: 'padMsg', pad: 1, m: { t: 'openLobby', gameId: 'deadofnight' } });
+  await waitFor(tv, s => s.phase === 'lobby');
+  tv.send({ t: 'padMsg', pad: 1, m: { t: 'addBot' } });
+  await sleep(150);
+  if (tv.sync.lobby.seats.length !== 1) throw new Error('a bot joined Dead of Night');
+  tv.send({ t: 'padMsg', pad: 1, m: { t: 'start' } });
+  const g = await waitFor(tv, s => s.phase === 'game');
+  if (g.game.mode !== 'relay' || g.pads[1].seat !== 0) throw new Error('Dead of Night did not seat the pad');
+  const busy = await fetch(`${BASE}/api/bench`, { method: 'POST' });
+  if (busy.status !== 409) throw new Error('bench was allowed over a running game');
+  tv.send({ t: 'relayQuit' });
+  await waitFor(tv, s => s.phase === 'hub');
+  ok('Dead of Night: pad hosts, no bots, bench refused mid-game, quits to hub');
+
+  const bench = await (await fetch(`${BASE}/api/bench?secs=10`, { method: 'POST' })).json();
+  if (!bench.ok) throw new Error('bench refused at an idle hub: ' + bench.err);
+  await waitFor(tv, s => s.phase === 'game' && s.game.options?.bench);
+  tv.send({ t: 'relayEnd', result: { title: 'Benchmark finished' } });
+  await waitFor(tv, s => s.phase === 'hub');
+  ok('bench session starts from an idle hub and ends straight back at it');
+  tv.send({ t: 'padBye', pad: 1 });
+
+  const url = `${BASE}/api/profiles/deadofnight/e2e-test`;
+  const put = v => fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ v }) });
+  await put(1); await put(2);
+  const got = await (await fetch(url)).json();
+  if (got.v !== 2) throw new Error('profile round-trip failed');
+  // Corrupt the main file (the e2e runs from the server's own tree): the
+  // previous good copy must come back.
+  const { default: fs } = await import('fs');
+  const { fileURLToPath } = await import('url');
+  const file = fileURLToPath(new globalThis.URL('../data/profiles/deadofnight/e2e-test.json', import.meta.url));
+  if (fs.existsSync(file)) {
+    fs.writeFileSync(file, '{"v": 3, trunc');
+    const back = await (await fetch(url)).json();
+    if (back.v !== 1) throw new Error('corrupt profile did not fall back to .bak (got ' + JSON.stringify(back) + ')');
+    fs.rmSync(file); fs.rmSync(file + '.bak');
+    ok('profiles round-trip; a corrupt file falls back to its .bak');
+  } else {
+    ok('profiles round-trip (corruption check skipped: server runs from another tree)');
+  }
+  if ((await fetch(`${BASE}/api/profiles/hearts/x`)).status !== 404) throw new Error('profiles open to non-relay games');
+}
+
 // Cabinet (RetroArch) flow — runs only when the server sees an emulator
 // setup (real, or the fake one the test harness fabricates via env vars).
 if (alice.sync.emu?.available) {

@@ -129,8 +129,9 @@ function handlePad(pad, btn, isRepeat) {
 function hubGroups() {
   if (tvMode === 'retro') return retroLayout().rows;
   if (tvMode === 'party') {
-    const row = sync.games.map(g => ({ kind: 'game', g }));
-    return row.length ? [row] : [];
+    // One shelf per category, in registry order (cards first).
+    const cats = [...new Set(sync.games.map(g => g.category))];
+    return cats.map(c => sync.games.filter(g => g.category === c).map(g => ({ kind: 'game', g })));
   }
   return [];
 }
@@ -442,6 +443,8 @@ function pauseMenuSpec(mode) {
 function padGame(pad, btn, info, isRepeat) {
   const G = sync.game;
   if (G.mode === 'relay') {
+    // Immersive games run their own menus (pause included) off raw pads.
+    if (modules[G.gameId]?.tv?.immersive) return;
     // Arcade sims poll pads directly — Start (unused by the sims) pauses;
     // while this pad's menu is open the sim ignores it (see padDown).
     const menu = menus.get(pad);
@@ -647,6 +650,22 @@ const GAME_ICONS = {
       + '<rect x="-8" y="5.5" width="16" height="3.5" rx="1" fill="#b98bff"/>')),
 };
 
+// Dead of Night: a full moon over a grave mound, one hand clawing out.
+GAME_ICONS.deadofnight = s => svgIcon(s, 64, 60, `
+  <circle cx="42" cy="20" r="15" fill="#f3e9c6"/>
+  <circle cx="37" cy="16" r="3" fill="#d9cda4"/><circle cx="47" cy="25" r="2.2" fill="#d9cda4"/>
+  <path d="M0 60 Q32 40 64 60 Z" fill="#2d3253"/>
+  <g fill="#7fb07f" stroke="#2b4a30" stroke-width="1.2" stroke-linejoin="round">
+    <rect x="20" y="36" width="10" height="20" rx="2"/>
+    <rect x="16.5" y="25" width="17" height="14" rx="4"/>
+    <rect x="16.8" y="13" width="3.6" height="14" rx="1.6"/>
+    <rect x="21.2" y="9.5" width="3.6" height="17" rx="1.6"/>
+    <rect x="25.6" y="10.5" width="3.6" height="16" rx="1.6"/>
+    <rect x="30" y="15" width="3.4" height="12" rx="1.6"/>
+    <path d="M17 32 L10.5 25 L12.5 22.5 L19 28 Z"/>
+  </g>
+  <path d="M18 46 L20 42 L22 45 L24 41 L26 45 L28 41.5 L30 45 L32 43 L32 56 L18 56 Z" fill="#4b3a80"/>`);
+
 function gameIcon(g, size) {
   return GAME_ICONS[g.id]
     ? GAME_ICONS[g.id](size)
@@ -704,22 +723,26 @@ function hubScreen() {
   if (tvMode === null) return chooseScreen();
   if (tvMode === 'settings') return settingsScreen();
   if (tvMode === 'retro') return retroHubScreen();
-  const list = hubList();
+  let i = 0; // running index across shelves — matches hubCursor
   return h('div', { class: 'tv-stage' },
     h('div', { class: 'tv-top' }, wordmark(44), urlBox()),
     h('div', { class: 'hub-fill' },
       h('div', { class: 'hub-center' },
-        h('div', { class: 'eyebrow', style: 'font-size:15px;margin-bottom:14px' }, '🃏 Card games'),
-        h('div', { class: 'hub-grid' },
-          list.map((e, i) => {
-            const g = e.g;
-            return h('div', { class: 'game-tile cat-cards' + (i === hubCursor ? ' tv-focus' : '') },
-              sync.saves[g.id] && h('div', { class: 'g-save' }, '💾 SAVED'),
-              h('span', { class: 'g-icon' }, gameIcon(g, 92)),
-              h('div', { class: 'g-name', style: 'font-size:24px' }, g.name),
-              h('div', { class: 'g-sub', style: 'font-size:15px' },
-                `${g.minPlayers === g.maxPlayers ? g.minPlayers : g.minPlayers + '–' + g.maxPlayers} players`));
-          })))),
+        hubGroups().flatMap(row => [
+          h('div', { class: 'eyebrow', style: 'font-size:15px;margin:0 0 14px' },
+            CATEGORY_LABELS[row[0].g.category] || row[0].g.category),
+          h('div', { class: 'hub-grid', style: 'margin-bottom:22px' },
+            row.map(e => {
+              const g = e.g;
+              return h('div', { class: `game-tile cat-${g.category}` + (i++ === hubCursor ? ' tv-focus' : '') },
+                sync.saves[g.id] && h('div', { class: 'g-save' }, '💾 SAVED'),
+                h('span', { class: 'g-icon' }, gameIcon(g, 92)),
+                h('div', { class: 'g-name', style: 'font-size:24px' }, g.name),
+                h('div', { class: 'g-sub', style: 'font-size:15px' },
+                  `${g.minPlayers === g.maxPlayers ? g.minPlayers : g.minPlayers + '–' + g.maxPlayers} players`
+                  + (g.needsPad ? ' · 🎮 controller' : '')));
+            })),
+        ]))),
     h('div', { class: 'tv-seats', style: 'margin:6px 0' },
       sync.players.length
         ? sync.players.map(p => h('div', { class: 'chip' }, h('span', { class: 'dot' }, p.name[0]?.toUpperCase()), p.name))
@@ -728,11 +751,20 @@ function hubScreen() {
   );
 }
 
+const CATEGORY_LABELS = { cards: '🃏 Card games', action: '🧟 Action' };
+
+// "Card games — …" until there's more than cards on the shelves.
+function partySub() {
+  const names = { cards: 'Card games', action: 'action' };
+  const cats = [...new Set(sync.games.map(g => g.category))].map(c => names[c] || c);
+  return cats.length > 1 ? `${cats.join(' & ')} — phones and controllers` : `${cats[0] || 'Card games'} — phones and controllers`;
+}
+
 // Landing chooser: the console's first screen — retro classics or party games?
 function chooseScreen() {
   const emuGames = (sync.emu?.systems || []).reduce((n, s) => n + s.games.length, 0);
   const tiles = [
-    { icon: () => h('span', { style: 'font-size:76px;line-height:1.2' }, '🃏'), name: 'Party Games', sub: 'Card games — phones and controllers', cls: 'cat-cards', mode: 'party' },
+    { icon: () => h('span', { style: 'font-size:76px;line-height:1.2' }, '🃏'), name: 'Party Games', sub: partySub(), cls: 'cat-cards', mode: 'party' },
     {
       icon: () => arcadeIcon(76), name: 'Retro Games', cls: 'cat-arcade', mode: 'retro',
       sub: sync.emu?.available ? `${emuGames} classics on the emulator` : `Add ROMs at http://${joinHost()}/roms`,
@@ -820,7 +852,8 @@ function lobbyScreen() {
       h('div', { class: 'center' },
         h('div', { class: 'tv-big', style: 'font-size:50px;margin-bottom:10px' }, 'Who’s in?'),
         h('p', { class: 'dim', style: 'font-size:22px' },
-          `${L.hostName} starts the game when everyone’s seated. Empty seats become bots.`))),
+          `${L.hostName} starts the game when everyone’s seated.`
+            + (g.bots === false ? ' Press any button on a controller to join.' : ' Empty seats become bots.')))),
     h('div', { class: 'tv-seats' }, L.seats.map(s =>
       h('div', { class: 'chip' + (s.bot ? ' bot' : '') },
         h('span', { class: 'dot' }, s.bot ? '🤖' : s.name[0]?.toUpperCase()), s.name))),
@@ -844,6 +877,21 @@ function menuPanels() {
   return panels;
 }
 
+// The live Gamepad driving a seat on this screen: that seat's own pad, or —
+// for a seat whose player is on a phone, or nobody's yet — the first pad
+// that isn't some other seat's. Read fresh every call: pads reconnect and
+// renumber, and the game polls this every frame.
+function gamepadForSeat(seat) {
+  const all = navigator.getGamepads?.() || [];
+  const taken = new Map();
+  for (const [pad, info] of Object.entries(sync?.pads || {})) {
+    if (info.seat >= 0) taken.set(info.seat, Number(pad));
+  }
+  if (taken.has(seat)) return all[taken.get(seat)] || null;
+  const busy = new Set(taken.values());
+  return [...all].find(gp => gp && gp.connected && !busy.has(gp.index)) || null;
+}
+
 function gameScreen() {
   const G = sync.game;
   const g = sync.games.find(x => x.id === G.gameId);
@@ -856,7 +904,8 @@ function gameScreen() {
           `⚠️ ${g.name}'s screen failed to load — check the browser console. The game engine is still running.`)));
   }
 
-  const holder = h('div', { class: 'tv-scene' });
+  const immersive = G.mode === 'relay' && !!mod.tv?.immersive;
+  const holder = h('div', { class: immersive ? 'tv-immersive' : 'tv-scene' });
   const padSeats = {};
   for (const [pad, info] of Object.entries(sync.pads || {})) {
     if (info.seat >= 0) padSeats[info.seat] = Number(pad);
@@ -878,6 +927,10 @@ function gameScreen() {
               && pads.isDown(padSeats[seat], k2),
             end: result => net.send({ t: 'relayEnd', result }),
             sendScore: d => net.send({ t: 'relayScore', d }),
+            // Raw analog access for games that need sticks and triggers.
+            gamepad: seat => gamepadForSeat(seat),
+            // Straight back to the hub (an immersive game's own "Quit").
+            quit: () => net.send({ t: 'relayQuit' }),
           });
           scene.api = relaySim;
         }
@@ -915,6 +968,7 @@ function gameScreen() {
     }
   }
 
+  if (immersive) return holder; // the game draws every pixel, HUD and menus included
   return h('div', { class: 'tv-stage' },
     h('div', { class: 'tv-top' },
       h('div', { class: 'tv-title', style: 'font-size:26px' }, gameIcon(g, 38), g.name),

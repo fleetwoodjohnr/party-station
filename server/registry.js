@@ -6,9 +6,11 @@ import * as holdem from './games/cards/holdem.js';
 import * as blackjack from './games/cards/blackjack.js';
 import * as gofish from './games/cards/gofish.js';
 import * as spite from './games/cards/spite.js';
+import * as deadofnight from './games/action/deadofnight.js';
 
 export const MODULES = [
   hearts, crazy8s, holdem, blackjack, gofish, spite,
+  deadofnight,
 ];
 
 const map = new Map(MODULES.map(m => [m.meta.id, m]));

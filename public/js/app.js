@@ -262,7 +262,7 @@ function lobbyScreen() {
       h('div', { class: 'eyebrow' }, `Table (${L.seats.length}/${g.maxPlayers})`),
       h('div', { class: 'row wrap' },
         L.seats.map((s2, i) => chipEl(s2)),
-        L.youAreHost && L.seats.length < g.maxPlayers
+        L.youAreHost && g.bots !== false && L.seats.length < g.maxPlayers
           && h('button', { class: 'tok small', onclick: () => net.send({ t: 'addBot' }) }, '+ 🤖 Add bot'),
       ),
       L.youAreHost && L.seats.some(s2 => s2.bot)

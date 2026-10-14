@@ -8,7 +8,10 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
-import { handleConnection, isIdle, notifyClients } from './lobby.js';
+import { handleConnection, isIdle, notifyClients, startBench } from './lobby.js';
+import { byId } from './registry.js';
+import * as saves from './saves.js';
+import * as perf from './perf.js';
 import { getArt } from './art.js';
 import { defaultAudioToHdmi } from './audio.js';
 import * as emulator from './emulator.js';
@@ -67,6 +70,45 @@ app.post('/api/kiosk/exit', (_req, res) => {
 app.post('/api/tv/reload', (_req, res) => {
   execFile('pkill', ['-f', 'user-data-dir=.*party-station-kiosk'], () => res.json({ ok: true }));
 });
+// Long-lived per-game data for real-time games (settings, progression,
+// world saves). Kept beside the turn-based saves in data/, which survives
+// self-updates; a .bak of the previous copy guards against corruption.
+const relayGame = (req, res, next) => (byId(req.params.game)?.meta.mode === 'relay'
+  ? next() : res.status(404).json({ ok: false, err: 'unknown game' }));
+app.get('/api/profiles/:game', relayGame, (req, res) => res.json({ keys: saves.listProfiles(req.params.game) }));
+app.get('/api/profiles/:game/:key', relayGame, (req, res) => {
+  const d = saves.loadProfile(req.params.game, req.params.key);
+  if (d) res.set('Cache-Control', 'no-store').json(d);
+  else res.status(404).set('Cache-Control', 'no-store').json({ ok: false });
+});
+app.put('/api/profiles/:game/:key', relayGame, express.json({ limit: '4mb' }), (req, res) => {
+  if (!req.body || typeof req.body !== 'object') return res.status(400).json({ ok: false });
+  try {
+    saves.saveProfile(req.params.game, req.params.key, req.body);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('profile save failed', req.params.game, req.params.key, e.message);
+    res.status(500).json({ ok: false, err: e.message });
+  }
+});
+// Frame-time beacons from the TV's renderer, joined with what the Pi itself
+// says (free RAM, swap, kiosk memory, SoC temperature) — readable remotely
+// at /api/status, so a bench can be judged without standing at the TV.
+app.post('/api/perf', express.json({ limit: '64kb' }), (req, res) => {
+  perf.record(req.body || {});
+  res.json({ ok: true });
+});
+// Kick off a scripted benchmark run on the TV (idle hub only). Query keys
+// are passed to the game as options: secs, preset, scene, zombies.
+app.post('/api/bench', (req, res) => {
+  const opts = {};
+  for (const k of ['secs', 'preset', 'scene', 'zombies']) {
+    if (req.query[k] != null) opts[k] = String(req.query[k]).slice(0, 24);
+  }
+  const r = startBench(String(req.query.game || 'deadofnight'), opts);
+  if (r.err) res.status(409).json({ ok: false, err: r.err });
+  else { perf.resetRun(); res.json(r); }
+});
 app.get('/api/status', (_req, res) => res.json({
   ok: true,
   version: updater.status.version,
@@ -75,6 +117,7 @@ app.get('/api/status', (_req, res) => res.json({
   lastCheck: updater.status.lastCheck ? new Date(updater.status.lastCheck).toISOString() : null,
   updateError: updater.status.error,
   emulatorLastExit: emulator.lastExitInfo(),
+  perf: perf.summary(),
 }));
 
 const server = http.createServer(app);

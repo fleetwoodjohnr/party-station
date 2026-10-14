@@ -38,6 +38,7 @@ function gameLite() {
   return catalog().map(m => ({
     id: m.id, name: m.name, tagline: m.tagline, icon: m.icon, category: m.category,
     minPlayers: m.minPlayers, maxPlayers: m.maxPlayers, mode: m.mode, options: m.options || [],
+    bots: m.bots !== false, needsPad: !!m.needsPad, description: m.description,
   }));
 }
 
@@ -379,7 +380,7 @@ function onPlayerMsg(p, m) {
     case 'addBot': {
       if (phase !== 'lobby' || p.id !== lobby.hostPid) break;
       const meta = byId(lobby.gameId).meta;
-      if (lobbySize() < meta.maxPlayers) {
+      if (meta.bots !== false && lobbySize() < meta.maxPlayers) {
         lobby.bots.push(botName([...lobby.bots, ...lobby.humans.map(h => players.get(h)?.name)]));
       }
       broadcast(); break;
@@ -550,9 +551,14 @@ function onTvMsg(ws, m) {
     }
     case 'relayEnd': { // the TV sim finished an arcade game
       if (phase !== 'game' || !session || session.mode !== 'relay') break;
+      if (session.options?.bench) { returnToHub(); break; } // nobody to show a scoreboard to
       session.over = m.result || { title: 'Game over' };
       phase = 'gameover';
       broadcast(); break;
+    }
+    case 'relayQuit': { // an immersive game's own "Quit to Party Station"
+      if (phase === 'game' && session?.mode === 'relay') returnToHub();
+      break;
     }
     case 'relayScore': { // lightweight score mirror for phones during arcade games
       if (phase !== 'game' || !session || session.mode !== 'relay') break;
@@ -626,4 +632,25 @@ export function handleConnection(ws) {
 }
 
 export function isIdle() { return phase === 'hub'; }
+
+// Performance bench (POST /api/bench): runs a relay game on the TV with a
+// synthetic seat and options.bench, so the real launch path is what gets
+// measured. Only from an idle hub — it never interrupts anyone — and a
+// watchdog brings the hub back if the TV never reports the end.
+export function startBench(gameId, opts = {}) {
+  const mod = byId(gameId);
+  if (!mod || mod.meta.mode !== 'relay') return { err: 'not a relay game' };
+  if (phase !== 'hub' || emulator.publicState()) return { err: 'busy — bench only runs from an idle hub' };
+  if (!tvSockets.size) return { err: 'no TV connected' };
+  const secs = Math.min(600, Math.max(10, Number(opts.secs) || 60));
+  session = {
+    gameId, mode: 'relay', options: { ...opts, bench: true, secs },
+    seats: [{ name: 'Bench', bot: true, pid: null }], game: null, over: null, botTimers: new Map(),
+  };
+  phase = 'game';
+  const s = session;
+  setTimeout(() => { if (session === s) returnToHub(); }, (secs + 60) * 1000);
+  broadcast();
+  return { ok: true, secs };
+}
 export { broadcast as notifyClients };
