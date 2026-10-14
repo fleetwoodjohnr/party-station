@@ -9,7 +9,7 @@ import { Zombies } from './sim/zombies.js';
 import { PadInput, DEFAULT_SETTINGS } from './input.js';
 import { injectStyles, h, mount, Menu, hints } from './ui.js';
 import { audio } from './audio.js';
-import { Stack, settingsScreen, controlsScreen } from './menus.js';
+import { Stack, settingsScreen, controlsScreen, careerScreen, modeScreen } from './menus.js';
 import { PlayState } from './play.js';
 
 const GAME = 'deadofnight';
@@ -253,8 +253,11 @@ class TitleState {
     this.stack = new Stack(a.uiLayer, a.input, n => a.sfx(n));
     const ret = this.stack.pop.bind(this.stack);
     this.stack.pop = () => { ret(); if (!this.stack.open) this.draw(); };
+    loadProfile('career').then(c => { this.career = c || { xp: 0 }; });
+    const play = opts => a.setState(new PlayState(a, { ...opts, career: this.career || { xp: 0 } }));
     this.menu = new Menu([
-      { label: 'Classic Survival', sub: 'Hold the Route 9 Diner through endless waves', act: () => a.setState(new PlayState(a, {})) },
+      { label: 'Classic Survival', sub: 'Hold the Route 9 Diner — doors, perks, the Forge, a Warden every tenth round', act: () => this.stack.push(modeScreen(a, this.stack, play)) },
+      { label: 'Career', sub: 'Rank, unlocks and records', act: () => this.stack.push(careerScreen(a, this.stack, this.career)) },
       { label: 'Settings', act: () => this.stack.push(settingsScreen(a, this.stack)) },
       { label: 'Controls', act: () => this.stack.push(controlsScreen(a, this.stack)) },
       { label: 'Run benchmark', sub: 'One-minute flythrough with 40 zombies — measures this TV', act: () => a.setState(new BenchState(a)) },

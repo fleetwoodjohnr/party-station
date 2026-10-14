@@ -7,8 +7,9 @@ import { Zombies, ZT } from '../public/js/night/sim/zombies.js';
 import { Game } from '../public/js/night/sim/game.js';
 import { emptyInput } from '../public/js/night/sim/player.js';
 import { botInput } from '../public/js/night/sim/bot.js';
-import { WEAPONS, falloff } from '../public/js/night/sim/weapons.js';
-import { zombieHp, roundTotal } from '../public/js/night/sim/classic.js';
+import { WEAPONS, falloff, newWeapon, statsOf, RARITY } from '../public/js/night/sim/weapons.js';
+import { zombieHp, roundTotal, WIN_ROUND, rankOf, xpForRank } from '../public/js/night/sim/classic.js';
+import { ZTYPES, S as ZS } from '../public/js/night/sim/zombies.js';
 
 let passed = 0;
 const ok = label => { passed++; console.log(`✓ ${label}`); };
@@ -136,6 +137,150 @@ let botResult;
   const ms = (performance.now() - t0) / N;
   assert.ok(ms < 2, `sim step too slow: ${ms.toFixed(3)} ms`);
   ok(`sim step with 28 zombies: ${ms.toFixed(3)} ms on this machine (Pi 4 ≈ 5–8× slower)`);
+}
+
+// ---------------------------------------------------------------- phase 3
+const fresh = (seed = 21, modeOpts = {}) => {
+  const game = new Game({ world: new World(DINER), seed, modeOpts });
+  game.mode.phase = 'between'; game.mode.timer = 999; // director idle unless a test wants it
+  return game;
+};
+const at = (P, x, z) => { P.x = x; P.z = z; };
+const pressX = game => { const i = emptyInput(); i.xPressed = true; i.x = true; game.step(DT, [i]); game.step(DT, [emptyInput()]); };
+const run = (game, secs, inp = () => emptyInput()) => { for (let t = 0; t < secs; t += DT) game.step(DT, [inp()]); };
+const evs = game => game.drain();
+
+{ // perks, crate, Forge, gunsmith rank gate
+  const game = fresh(), P = game.players[0], W = game.world;
+  P.points = 50000;
+  const m = W.machines.find(k => k.perk === 'ironhide');
+  for (const d of Object.values(W.doors)) W.openDoor(d.id);
+  at(P, m.x + 0.5, m.y + 1.5); pressX(game);
+  assert.ok(P.perks.has('ironhide') && P.maxHp === 250, 'Iron Hide not applied');
+  const crate = W.machines.find(k => k.kind === 'crate');
+  at(P, crate.x + 0.5, crate.y + 1.5); pressX(game);
+  assert.equal(game.mode.crate.state, 'rolling');
+  run(game, 3.2);
+  assert.equal(game.mode.crate.state, 'offer');
+  const offered = game.mode.crate.weapon;
+  pressX(game);
+  assert.ok(P.weapons.some(w => w.id === offered), 'crate weapon not taken');
+  P.cur = P.weapons.findIndex(w => w.id === offered);
+  const tier0 = P.weapon.tier;
+  if (tier0 < RARITY.length - 1) { assert.ok(game.mode.forgeUpgrade(P)); assert.equal(P.weapon.tier, tier0 + 1); }
+  const tier1 = P.weapon.tier;
+  P.cur = 0; // pistol
+  game.mode.rank = 1;
+  assert.ok(!game.mode.gunsmith(P, 'muzzle', 'suppressor'), 'rank-5 attachment allowed at rank 1');
+  assert.ok(game.mode.gunsmith(P, 'mag', 'extmag'), 'extended mag refused');
+  assert.equal(statsOf(P.weapon, P.perks).mag, 12, 'extended mag should give 12 rounds');
+  ok(`perks, crate (${offered}), Forge tier ${tier0}→${tier1}, gunsmith gated by rank`);
+}
+
+{ // trap, frag, noisemaker decoy
+  const game = fresh(), P = game.players[0], W = game.world, Z = game.zombies;
+  P.points = 5000;
+  W.openDoor(1);
+  const tr = W.traps[0];
+  at(P, tr.lever.x + 0.5 + tr.lever.face[0] * 0.8, tr.lever.y + 0.5 + tr.lever.face[1] * 0.8);
+  pressX(game);
+  assert.ok(tr.active > 0, 'trap did not switch on');
+  const zi = Z.spawn(ZT.walker, tr.cells[0][0] + 0.5, tr.cells[0][1] + 0.5, 500, 1);
+  Z.state[zi] = ZS.CHASE; Z.y[zi] = 0;
+  run(game, 0.3);
+  assert.ok(!Z.isLive(zi), 'trap did not kill');
+  // Frag at the feet of three zombies.
+  at(P, 20.5, 17.5);
+  const ids = [0, 1, 2].map(k => { const i = Z.spawn(ZT.walker, 24 + k * 0.5, 17.5, 150, 0.01); Z.state[i] = ZS.CHASE; Z.y[i] = 0; return i; });
+  game.explode(24.5, 0.3, 17.5, 4.5, 420, 0, 'frag');
+  assert.ok(ids.every(i => !Z.isLive(i)), 'frag left survivors');
+  // Noisemaker: zombies chase it instead of the player.
+  P.tactical = { id: 'noisemaker', n: 1 };
+  P.yaw = Math.PI / 2; P.pitch = 0.2; // throw west
+  const i2 = emptyInput(); i2.tactical = true; game.step(DT, [i2]);
+  run(game, 2);
+  assert.equal(game.equipment.decoys.length, 1, 'noisemaker never became a decoy');
+  assert.equal(game.targets(), game.equipment.decoys);
+  run(game, 6);
+  assert.equal(game.equipment.decoys.length, 0, 'noisemaker never went off');
+  ok('electric trap kills, frag clears a cluster, noisemaker pulls the horde then detonates');
+}
+
+{ // armour, AP, penetration, burst
+  const game = fresh(), P = game.players[0], Z = game.zombies;
+  const a = Z.spawn(ZT.armored, 25, 17.5, 500, 0.01);
+  const plain = Z.damage(a, 100, true).kill;
+  assert.ok(!plain && Z.hp[a] > 400, 'helmet did not soak a headshot');
+  const b = Z.spawn(ZT.armored, 26, 17.5, 500, 0.01);
+  Z.damage(b, 100, true, -1, 'gun', 2);
+  assert.ok(Z.hp[b] <= 400, 'AP did not pierce');
+  Z.clear();
+  // Sniper through two zombies in a line.
+  at(P, 13.5, 17.5); P.yaw = -Math.PI / 2; P.pitch = 0; // look east (+x)
+  P.weapons = [newWeapon('sniper', true)]; P.cur = 0; P.act = 'idle';
+  const z1 = Z.spawn(ZT.walker, 16.5, 17.5, 5000, 0.01), z2 = Z.spawn(ZT.walker, 18.5, 17.5, 5000, 0.01);
+  for (const i of [z1, z2]) { Z.state[i] = ZS.CHASE; Z.y[i] = 0; Z.yaw[i] = 0; }
+  P.ads = 1;
+  const f = emptyInput(); f.firePressed = true; f.fire = true; f.ads = true; f.assist = 'off';
+  game.step(DT, [f]);
+  assert.ok(Z.hp[z1] < 5000 && Z.hp[z2] < 5000, 'sniper round did not penetrate');
+  // Burst rifle: one pull, three rounds.
+  P.weapons = [newWeapon('br', true)]; P.cur = 0; P.act = 'idle'; P.fireCd = 0;
+  const shots = P.shots;
+  game.step(DT, [f]);
+  run(game, 0.5, () => { const i = emptyInput(); i.ads = true; i.assist = 'off'; return i; });
+  assert.equal(P.shots - shots, 3, 'burst fired ' + (P.shots - shots));
+  ok('helmets soak, AP pierces, the Longbow goes through two, the Bulldog fires 3-round bursts');
+}
+
+{ // specials do their thing
+  const game = fresh(), P = game.players[0], Z = game.zombies;
+  P.god = true; at(P, 20.5, 17.5);
+  const mk = (type, x, z) => { const i = Z.spawn(ZT[type], x, z, 1e5, ZTYPES[ZT[type]].speed[0]); Z.state[i] = ZS.CHASE; Z.y[i] = 0; Z.cd2[i] = 0; return i; };
+  mk('spitter', 28.5, 17.5); mk('brute', 26.5, 14.5); mk('screamer', 14.5, 14.5);
+  const seen = new Set();
+  for (let t = 0; t < 10; t += DT) { game.step(DT, [emptyInput()]); for (const e of game.drain()) seen.add(e.e); }
+  for (const e of ['spit', 'charge', 'scream']) assert.ok(seen.has(e), `no ${e}`);
+  Z.clear();
+  at(P, 20.5, 17.5); P.vx = P.vz = 0; // the brute's charge shoved us
+  const ex = mk('exploder', 21.5, 17.5);
+  let boom = false;
+  for (let t = 0; t < 4 && !boom; t += DT) { game.step(DT, [emptyInput()]); boom = game.drain().some(e => e.e === 'boom' && e.kind === 'exploder'); }
+  assert.ok(boom && !Z.isLive(ex), 'exploder never blew');
+  ok('spitter spits, brute charges, screamer screams, exploder detonates at your feet');
+}
+
+{ // boss round
+  const game = new Game({ world: new World(DINER), seed: 4, modeOpts: { startRound: 10 } });
+  const P = game.players[0]; P.god = true;
+  run(game, 12);
+  const bi = game.mode.boss;
+  assert.ok(bi >= 0 && ZTYPES[game.zombies.type[bi]].id === 'warden', 'no Warden on round 10');
+  const pts = P.points;
+  game.zombies.damage(bi, 1e9, false, 0, 'gun');
+  game.step(DT, [emptyInput()]);
+  assert.ok(P.points >= pts + 1000 && game.mode.drops.some(d => d.kind === 'maxammo'), 'boss kill paid nothing');
+  ok('round 10 brings the Warden; killing it pays 1000 and drops Max Ammo');
+}
+
+{ // power-ups, Second Wind, standard victory, ranks
+  const game = fresh(), P = game.players[0], W = game.world;
+  P.weapon.reserve = 0;
+  game.mode._drop('maxammo', P.x, P.z);
+  game.step(DT, [emptyInput()]);
+  assert.ok(P.weapon.reserve > 0, 'max ammo not applied');
+  W.setBoards(0, 0); game.mode._drop('carpenter', P.x, P.z); game.step(DT, [emptyInput()]);
+  assert.equal(W.windows[0].boards, 6);
+  P.addPerk('secondwind');
+  P.hurt(1000, game);
+  run(game, 3.5);
+  assert.ok(!P.down && !P.perks.has('secondwind'), 'Second Wind did not revive');
+  const g2 = new Game({ world: new World(DINER), seed: 5, modeOpts: { startRound: WIN_ROUND, standard: true } });
+  g2.mode.phase = 'wave'; g2.mode.round = WIN_ROUND; g2.mode.toSpawn = 0;
+  g2.step(DT, [emptyInput()]);
+  assert.ok(g2.drain().some(e => e.e === 'victory'), 'no victory at round 30');
+  assert.equal(rankOf(0), 1); assert.equal(rankOf(xpForRank(5)), 5); assert.equal(rankOf(xpForRank(5) - 1), 4);
+  ok('Max Ammo and Carpenter work, Second Wind revives once, Standard ends at round 30, ranks add up');
 }
 
 console.log(`\nAll ${passed} Dead of Night sim checks passed.`);

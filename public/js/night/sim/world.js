@@ -4,14 +4,14 @@
 // collision, a 3D ray march for bullets and sight lines, and the shared
 // flow field every zombie steers by.
 
-export const C = { FLOOR: 0, GROUND: 1, WALL: 2, WINDOW: 3, DOOR: 4, PROP: 5, TREE: 6, CAR: 7, FENCE: 8, VOID: 9 };
+export const C = { FLOOR: 0, GROUND: 1, WALL: 2, WINDOW: 3, DOOR: 4, PROP: 5, TREE: 6, CAR: 7, FENCE: 8, VOID: 9, MACHINE: 10 };
 const CHAR = {
   '.': C.FLOOR, P: C.FLOOR, ',': C.GROUND, S: C.GROUND, '#': C.WALL, W: C.WINDOW,
-  T: C.PROP, t: C.TREE, c: C.CAR, f: C.FENCE, X: C.VOID,
+  T: C.PROP, t: C.TREE, c: C.CAR, f: C.FENCE, X: C.VOID, M: C.MACHINE,
 };
 // Solid height of each cell type, for bullets and the renderer. Windows are
 // special-cased: a hole between WIN_LO and WIN_HI.
-export const TOP = [0, 0, 3.2, 3.2, 3.2, 1.0, 7, 1.4, 1.2, 50];
+export const TOP = [0, 0, 3.2, 3.2, 3.2, 1.0, 7, 1.4, 1.2, 50, 2.1];
 export const CEIL = 3.2;              // interior ceiling height
 export const WIN_LO = 0.9, WIN_HI = 2.2;
 export const MAX_BOARDS = 6;
@@ -65,6 +65,8 @@ export class World {
       }
     }
     this.wallbuys = (def.wallbuys || []).map(b => ({ ...b }));
+    this.machines = (def.machines || []).map(m => ({ ...m }));
+    this.traps = (def.traps || []).map(t => ({ ...t, active: 0, cool: 0 }));
     this.lamps = def.lamps || [];
     this.version = 0; // bumps whenever passability changes (flow field cache key)
   }
@@ -73,6 +75,7 @@ export class World {
   reset() {
     for (const w of this.windows) w.boards = MAX_BOARDS;
     for (const d of Object.values(this.doors)) d.open = false;
+    for (const t of this.traps) { t.active = 0; t.cool = 0; }
     this.version++;
   }
 
@@ -81,7 +84,7 @@ export class World {
     if (x < 0 || y < 0 || x >= this.w || y >= this.h) return C.VOID;
     return this.cells[y * this.w + x];
   }
-  interior(x, y) { const c = this.cell(x, y); return c === C.FLOOR || c === C.PROP || (c === C.DOOR); }
+  interior(x, y) { const c = this.cell(x, y); return c === C.FLOOR || c === C.PROP || c === C.DOOR || c === C.MACHINE; }
 
   // Can a body stand in this cell? Zombies also pass through bare windows.
   open(x, y, zombie = false) {
@@ -148,7 +151,7 @@ export class World {
       case C.GROUND: return false;
       case C.WINDOW: return y < WIN_LO || y > WIN_HI;
       case C.DOOR: return !this.doors[this.door[cz * this.w + cx]].open || y > CEIL;
-      case C.PROP: return y < TOP[C.PROP] || y > CEIL;
+      case C.PROP: case C.MACHINE: return y < TOP[c] || y > CEIL;
       default: return y < TOP[c];
     }
   }
@@ -185,7 +188,7 @@ export class World {
       case C.FLOOR: lo = 0; hi = CEIL; break;
       case C.WINDOW: lo = WIN_LO; hi = WIN_HI; break;
       case C.DOOR: if (this.doors[this.door[cz * this.w + cx]].open) { lo = 0; hi = CEIL; } else return t0; break;
-      case C.PROP: lo = TOP[C.PROP]; hi = CEIL; break;
+      case C.PROP: case C.MACHINE: lo = TOP[c]; hi = CEIL; break;
       default: lo = TOP[c]; hi = Infinity;
     }
     const y0 = oy + dy * t0, y1 = oy + dy * t1;

@@ -2,7 +2,8 @@
 // value changes (cheap on the Pi's CPU, crisp at 1080p while the 3D view
 // renders smaller). Large type, high contrast, controller glyphs.
 import { h } from './ui.js';
-import { WEAPONS, spreadOf } from './sim/weapons.js';
+import { spreadOf, PERKS, weaponName } from './sim/weapons.js';
+import { EQUIP } from './sim/equipment.js';
 
 const CSS = `
 .nn-hud{position:absolute;inset:0;pointer-events:none;font-weight:800}
@@ -35,6 +36,16 @@ const CSS = `
 .nn-obj{position:absolute;right:3vw;top:12vh;min-width:24vw}
 .nn-hpbar{position:absolute;left:3.4vw;bottom:calc(3vh + clamp(60px,7vw,130px) + 4.6vh);width:14vw;height:.45em;background:rgba(0,0,0,.5);border-radius:.3em;overflow:hidden;opacity:0;transition:opacity .4s}
 .nn-hpbar i{display:block;height:100%;background:#d23a3a}
+.nn-perks{position:absolute;left:3.4vw;bottom:calc(3vh + clamp(60px,7vw,130px) + 7.5vh);display:flex;gap:.35em}
+.nn-perks b{width:1.6em;height:1.6em;border-radius:.35em;display:flex;align-items:center;justify-content:center;font-size:.8em;color:#111;box-shadow:0 2px 0 rgba(0,0,0,.6)}
+.nn-equip{position:absolute;right:3.2vw;bottom:calc(3.4vh + 5.2em);text-align:right;font-size:.85em;color:#d8d0bd;text-shadow:0 2px 0 #000}
+.nn-boss{position:absolute;left:30vw;right:30vw;top:4vh;text-align:center;font:900 .9em system-ui;letter-spacing:.3em;color:#e8c0b0;text-shadow:0 2px 0 #000;display:none}
+.nn-boss .bar{height:.55em;margin-top:.3em;background:rgba(0,0,0,.6);border:1px solid #6a2a24;border-radius:.3em;overflow:hidden}
+.nn-boss .bar i{display:block;height:100%;background:linear-gradient(90deg,#a3141c,#ff4a3a)}
+.nn-timers{position:absolute;left:50%;top:9vh;transform:translateX(-50%);display:flex;gap:1.2em;font-weight:900;text-shadow:0 2px 0 #000}
+.nn-scope{position:absolute;inset:0;display:none;background:radial-gradient(circle at center,transparent 0 31vh,#000 31.3vh)}
+.nn-scope:before,.nn-scope:after{content:'';position:absolute;background:#000}
+.nn-scope:before{left:50%;top:19vh;bottom:19vh;width:2px;margin-left:-1px}.nn-scope:after{top:50%;left:calc(50% - 31vh);right:calc(50% - 31vh);height:2px;margin-top:-1px}
 `;
 
 export class Hud {
@@ -54,8 +65,13 @@ export class Hud {
     this.banner = h('div', { class: 'nn-banner' });
     this.note = h('div', { class: 'nn-note' });
     this.obj = h('div', { class: 'nn-obj nn-panel', style: 'display:none' });
-    this.root = h('div', { class: 'nn-hud' }, this.vign, this.x, this.hit, this.round, this.hpbar, this.pts,
-      this.ammo, this.prompt, this.banner, this.note, this.obj);
+    this.perks = h('div', { class: 'nn-perks' });
+    this.equip = h('div', { class: 'nn-equip' });
+    this.boss = h('div', { class: 'nn-boss' }, 'THE WARDEN', h('div', { class: 'bar' }, this.bossFill = h('i')));
+    this.timers = h('div', { class: 'nn-timers' });
+    this.scope = h('div', { class: 'nn-scope' });
+    this.root = h('div', { class: 'nn-hud' }, this.scope, this.vign, this.x, this.hit, this.round, this.hpbar, this.pts,
+      this.perks, this.ammo, this.equip, this.prompt, this.banner, this.note, this.obj, this.boss, this.timers);
     layer.appendChild(this.root);
     this.last = {};
     this.hitT = 0;
@@ -103,8 +119,31 @@ export class Hud {
     });
   }
 
-  update(dt, P, game, viewH, fovY) {
-    const W = WEAPONS[P.weapon.id];
+  update(dt, P, game, viewH, fovY, scoped = false) {
+    const W = P.W;
+    this._set('scope', scoped ? 1 : 0, v => { this.scope.style.display = v ? 'block' : 'none'; });
+    this._set('perks', [...P.perks].join(','), () => {
+      this.perks.replaceChildren(...[...P.perks].map(id => h('b', { style: `background:${PERKS[id].color}`, title: PERKS[id].name },
+        PERKS[id].name.split(' ').map(w => w[0]).join(''))));
+    });
+    const eq = `${P.lethal?.id}:${P.lethal?.n}|${P.tactical?.id}:${P.tactical?.n}|${this.input.family}`;
+    this._set('equip', eq, () => {
+      const row = (slot, btn) => slot ? `<div>${this.input.glyph(btn)}${EQUIP[slot.id].name} ×${slot.n}</div>` : '';
+      this.equip.innerHTML = row(P.lethal, 'lethal') + row(P.tactical, 'tactical');
+    });
+    const m = game.mode;
+    const bi = m.boss ?? -1;
+    const bossFrac = bi >= 0 && game.zombies.isLive(bi) ? game.zombies.hp[bi] / game.zombies.maxHp[bi] : -1;
+    this._set('boss', Math.round(bossFrac * 100), v => {
+      this.boss.style.display = v >= 0 ? 'block' : 'none';
+      if (v >= 0) this.bossFill.style.width = `${v}%`;
+    });
+    const tk = Object.entries(m.timed || {}).map(([k, t]) => `${k}:${Math.ceil(t)}`).join('|');
+    this._set('timers', tk, () => {
+      const names = { instakill: ['INSTA-KILL', '#ff6060'], doublepts: ['DOUBLE POINTS', '#ffd040'] };
+      this.timers.replaceChildren(...Object.entries(m.timed || {}).map(([k, t]) =>
+        h('span', { style: `color:${names[k]?.[1] || '#fff'}` }, `${names[k]?.[0] || k} ${Math.ceil(t)}`)));
+    });
     // Crosshair gap follows the real spread cone.
     const moving = Math.min(1, Math.hypot(P.vx, P.vz) / 4);
     const spread = spreadOf(W, P.ads, moving, P.bloom);
@@ -127,10 +166,10 @@ export class Hud {
     this._set('round', game.mode.round, r => { this.round.textContent = r > 0 ? String(r) : ''; });
     this._set('pts', P.points, p => { this.pts.textContent = p.toLocaleString(); });
     const wpn = P.weapon;
-    this._set('ammo', `${wpn.id}|${wpn.mag}|${wpn.reserve}|${P.infiniteAmmo}`, () => {
+    this._set('ammo', `${wpn.id}|${wpn.tier}|${wpn.mag}|${wpn.reserve}|${P.infiniteAmmo}|${W.mag}`, () => {
       const low = wpn.mag <= Math.ceil(W.mag * 0.25);
       this.ammo.replaceChildren(
-        h('div', { class: 'n' }, W.name),
+        h('div', { class: 'n', style: wpn.tier ? `color:${W.rarity.color}` : '' }, weaponName(wpn)),
         h('span', { class: 'm' + (low ? ' low' : '') }, String(wpn.mag)),
         h('span', { class: 'r' }, ` / ${P.infiniteAmmo ? '∞' : wpn.reserve}`));
     });

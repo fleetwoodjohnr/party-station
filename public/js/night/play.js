@@ -1,20 +1,24 @@
 // The in-game state: controller -> Input -> sim step -> events -> sound,
 // effects, HUD and camera. Also the pause menu (Start), the objectives
-// overlay (Select), controller-loss handling and the game-over screen.
+// overlay (Select), the Forge, controller-loss handling, XP/rank, and the
+// game-over / dawn screens.
 import { THREE } from './render.js';
 import { Game } from './sim/game.js';
 import { emptyInput } from './sim/player.js';
 import { botInput } from './sim/bot.js';
-import { WEAPONS } from './sim/weapons.js';
-import { buildViewmodel, poseViewmodel, muzzleFlash, Effects, chalkSign } from './gear.js';
+import { WEAPONS, PERKS, RARITY } from './sim/weapons.js';
+import { EQUIP } from './sim/equipment.js';
+import { rankOf } from './sim/classic.js';
+import { buildViewmodel, poseViewmodel, muzzleFlash, Effects, WorldProps, chalkSign, vmKey } from './gear.js';
 import { Hud } from './hud.js';
 import { audio } from './audio.js';
 import { h, Menu, hints } from './ui.js';
-import { Stack, settingsScreen, controlsScreen } from './menus.js';
+import { Stack, settingsScreen, controlsScreen, forgeScreen } from './menus.js';
 import { loadProfile, saveProfile } from './main.js';
 
 const BASE_FOV = 62;
 const LOOK_RATE = 2.9; // rad/s at sensitivity 5, full stick
+const POWER_NAMES = { maxammo: 'Max Ammo', instakill: 'Insta-Kill', doublepts: 'Double Points', carpenter: 'Carpenter', nuke: 'Nuke' };
 
 export class PlayState {
   constructor(app, opts = {}) {
@@ -26,11 +30,13 @@ export class PlayState {
   enter() {
     const a = this.app;
     const seat = a.ctx.seats?.[0];
+    this.career = this.opts.career || { xp: 0 };
+    this.rank = rankOf(this.career.xp || 0);
     this.game = new Game({
       world: a.world, zombies: a.pool, mode: 'classic',
       seats: [{ name: seat && !seat.bot ? seat.name : 'Survivor' }],
       seed: (Math.random() * 2 ** 31) | 0,
-      modeOpts: { startRound: this.opts.startRound || 1 },
+      modeOpts: { startRound: this.opts.startRound || 1, standard: !!this.opts.standard, rank: this.rank },
     });
     const P = this.P = this.game.players[0];
     this.home = [P.x, P.z];
@@ -39,11 +45,20 @@ export class PlayState {
       P.give('smg', null); P.give('shotgun', null);
     }
     this.fx = new Effects(a.view.scene);
+    this.props = new WorldProps(a.view.scene);
     this.signs = [];
     for (const b of a.world.wallbuys) {
-      const m = chalkSign(WEAPONS[b.weapon].model);
+      const m = chalkSign(b.weapon ? WEAPONS[b.weapon].model : b.melee || b.equip);
       m.position.set(b.x + 0.5 + b.face[0] * 0.505, 1.55, b.y + 0.5 + b.face[1] * 0.505);
       m.rotation.y = Math.atan2(b.face[0], b.face[1]);
+      a.view.scene.add(m); this.signs.push(m);
+    }
+    for (const t of a.world.traps) {
+      const m = chalkSign('text', `TRAP\n${t.cost}`);
+      const L = t.lever;
+      m.scale.setScalar(0.7);
+      m.position.set(L.x + 0.5 + L.face[0] * 0.505, 1.7, L.y + 0.5 + L.face[1] * 0.505);
+      m.rotation.y = Math.atan2(L.face[0], L.face[1]);
       a.view.scene.add(m); this.signs.push(m);
     }
     this.doorSigns = [];
@@ -60,7 +75,7 @@ export class PlayState {
         a.view.scene.add(m); this.doorSigns.push({ m, id: d.id });
       }
     }
-    this.vmFor(P.weapon.id);
+    this.vmFor();
     this.hudLayer = h('div', { class: 'nn-layer' });
     a.root.insertBefore(this.hudLayer, a.uiLayer);
     this.hud = new Hud(this.hudLayer, a.input);
@@ -69,17 +84,18 @@ export class PlayState {
     audio.volume(a.settings.volume / 10 * 0.9);
     audio.ambience(true);
     this.t = 0; this.groanT = 1; this.lastStep = 0; this.overT = -1; this.lostT = 0;
-    this.camRoll = 0; this.camDrop = 0;
-    this.camPos = new THREE.Vector3();
+    this.camRoll = 0; this.camDrop = 0; this.shake = 0;
     this.mz = new THREE.Vector3();
     if (this.opts.autopilot) this.hud.showBanner('Benchmark', `Autopilot from round ${this.opts.startRound || 1}`, 4);
     this.sendScore();
   }
 
-  vmFor(id) {
-    if (this.vm?.id === id) return;
+  // (Re)build the first-person model when the gun, its parts or the melee change.
+  vmFor() {
+    const P = this.P, key = vmKey(P.weapon, P.meleeId);
+    if (this.vm?.key === key) return;
     this._vmGroup?.traverse(o => { o.geometry?.dispose(); o.material?.dispose(); });
-    this.vm = buildViewmodel(id);
+    this.vm = buildViewmodel(P.weapon, P.meleeId);
     this._vmGroup = new THREE.Group();
     this._vmGroup.add(this.vm.root, this.vm.knife);
     this.app.view.setViewmodel(this._vmGroup);
@@ -94,8 +110,8 @@ export class PlayState {
   readInput(dt) {
     const I = this.app.input, s = this.app.settings, P = this.P;
     const inp = emptyInput();
-    const ads = 1 - P.ads * (1 - s.adsSens);
-    const rate = LOOK_RATE * (s.sens / 5) * ads * dt;
+    const ads = 1 - P.ads * (1 - s.adsSens) - (this.vm.def.scope ? P.ads * 0.35 : 0);
+    const rate = LOOK_RATE * (s.sens / 5) * Math.max(0.15, ads) * dt;
     inp.lookX = I.look[0] * rate;
     inp.lookY = I.look[1] * rate * 0.75;
     inp.mx = I.move[0]; inp.my = I.move[1];
@@ -104,6 +120,7 @@ export class PlayState {
     inp.jump = I.pressed('jump'); inp.crouch = I.pressed('crouch'); inp.sprint = I.pressed('sprint');
     inp.x = I.down('reload'); inp.xPressed = I.pressed('reload');
     inp.swap = I.pressed('swap'); inp.melee = I.pressed('melee');
+    inp.lethal = I.pressed('lethal'); inp.tactical = I.pressed('tactical');
     inp.assist = s.aimAssist;
     return inp;
   }
@@ -126,7 +143,7 @@ export class PlayState {
       g.step(Math.min(dt, 1 / 30), []); // the horde keeps feeding behind the death cam
       this.handle(g.drain());
       this.pose(dt, now, 0, 0);
-      if (this.overT > 3 && !this.menus.open) this.gameOver();
+      if (this.overT > 3 && !this.menus.open) this.endScreen(this.won);
       return;
     }
     if (I.pressed('pause') && !this.opts.autopilot) { this.openPause(false); return; }
@@ -140,10 +157,13 @@ export class PlayState {
       const h2 = Math.min(left, 1 / 30);
       g.step(h2, [inp]);
       left -= h2;
-      inp = { ...inp, firePressed: false, jump: false, crouch: false, sprint: false, xPressed: false, swap: false, melee: false, lookX: 0, lookY: 0 };
+      inp = { ...inp, firePressed: false, jump: false, crouch: false, sprint: false, xPressed: false, swap: false, melee: false, lethal: false, tactical: false, lookX: 0, lookY: 0 };
     }
     this.handle(g.drain());
-    this.hud.update(dt, P, g, a.view.res.h, a.view.camera.fov * Math.PI / 180);
+    if (a.state !== this) return;
+    this.vmFor();
+    const scoped = this.vm.def.scope && P.ads > 0.85;
+    this.hud.update(dt, P, g, a.view.res.h, a.view.camera.fov * Math.PI / 180, scoped);
     this.hud.objectives(I.down('map') && !this.opts.autopilot, g.mode);
     this.pose(dt, now, look[0] * 0.015, look[1] * 0.015);
     // Footsteps.
@@ -160,8 +180,22 @@ export class PlayState {
       if (live.length) {
         const i = live[Math.floor(Math.random() * live.length)];
         const [pan, vol] = this.where(Z.x[i], Z.z[i]);
-        audio.groan(pan, vol, Z.type[i] === 1 ? 1.25 : 1);
+        audio.groan(pan, vol, [1, 1.25, 0.9, 0.95, 0.6, 1.2, 1.6, 0.8, 0.45][Z.type[i]] || 1);
       }
+    }
+    // A live trap crackles.
+    for (const tr of g.world.traps) {
+      if (tr.active <= 0) continue;
+      const [cx, cz] = tr.cells[Math.floor(Math.random() * tr.cells.length)];
+      this.fx.burst(cx + Math.random(), 0.3 + Math.random() * 2.4, cz + Math.random(), 2, this.fx.spark, 3, 0.05, 2, 0.25);
+      if (Math.random() < 0.15) audio.zap();
+    }
+    // Rank up mid-match.
+    const r = rankOf((this.career.xp || 0) + P.xp);
+    if (r > this.rank && !this.opts.autopilot) {
+      this.rank = r; g.mode.rank = r;
+      audio.rankUp();
+      this.hud.showBanner(`Rank ${r}`, 'New attachments at the Forge', 3);
     }
     if (this.opts.benchSecs && this.t >= this.opts.benchSecs && !this.benchDone) this.finishBench();
   }
@@ -175,14 +209,15 @@ export class PlayState {
   }
 
   handle(events) {
-    const P = this.P, I = this.app.input, view = this.app.view;
+    const P = this.P, I = this.app.input, view = this.app.view, g = this.game, Z = g.zombies;
     for (const e of events) {
       switch (e.e) {
         case 'shot': {
           if (e.p !== P.seat) break;
           audio.gun(WEAPONS[e.w].sound);
           muzzleFlash(this.vm);
-          I.rumble(e.w === 'shotgun' ? 0.7 : 0.25, 0.35, e.w === 'shotgun' ? 140 : 60);
+          const heavy = ['shotgun', 'sniper', 'marksman', 'explosive'].includes(WEAPONS[e.w].cls);
+          I.rumble(heavy ? 0.7 : 0.25, 0.35, heavy ? 140 : 60);
           if (e.end) {
             this.mz.set(0.13 * (1 - P.ads), -0.09, -0.7).applyMatrix4(view.camera.matrixWorld);
             this.fx.tracer(this.mz.x, this.mz.y, this.mz.z, e.end[0], e.end[1], e.end[2]);
@@ -191,6 +226,7 @@ export class PlayState {
         }
         case 'hit':
           this.fx.burst(e.x, e.y, e.z2, e.head ? 14 : e.kill ? 10 : 5, this.fx.blood, e.head ? 3 : 2, e.head ? 0.08 : 0.06);
+          if (e.armor) { this.fx.burst(e.x, e.y, e.z2, 8, this.fx.metal, 3, 0.07); audio.armor(); }
           if (e.p === P.seat) {
             this.hud.flashHit(e.kill);
             if (e.kill) audio.kill(e.head); else audio.hitmark(e.head);
@@ -206,23 +242,81 @@ export class PlayState {
         }
         case 'repair': audio.hammer(); break;
         case 'windup': {
-          const Z = this.game.zombies;
           const [pan, vol] = this.where(Z.x[e.z], Z.z[e.z]);
           audio.swipe(pan, vol);
           if (Math.random() < 0.5) audio.groan(pan, vol, 1.1);
           break;
         }
         case 'hurt':
-          if (e.p === P.seat) { audio.hurt(); I.rumble(1, 0.8, 260); }
+          if (e.p === P.seat) { audio.hurt(); I.rumble(1, 0.8, 260); if (e.zap) audio.zap(); }
           break;
-        case 'points': if (e.p === P.seat && !e.silent) this.hud.popPoints(e.n); break;
-        case 'buy': audio.buy(); this.hud.popPoints(e.n); this.sendScore(); break;
+        case 'boom': {
+          this.fx.burst(e.x, e.y + 0.3, e.z, 26, this.fx.flame, 6, 0.16, 4, 0.6);
+          this.fx.burst(e.x, e.y + 0.3, e.z, 10, this.fx.smoke, 2.5, 0.3, 2, 1.2);
+          const [pan, vol] = this.where(e.x, e.z);
+          audio.boom(pan, Math.max(0.25, vol));
+          const near = Math.max(0, 1 - Math.hypot(e.x - P.x, e.z - P.z) / 14);
+          this.shake = Math.max(this.shake, near);
+          I.rumble(near, near, 350);
+          break;
+        }
+        case 'fire': { const [pan, vol] = this.where(e.x, e.z); audio.fire(pan, Math.max(0.3, vol)); break; }
+        case 'splat': { const [pan, vol] = this.where(e.x, e.z); audio.splat(pan, vol); this.fx.burst(e.x, e.y, e.z, 8, this.fx.acid, 2, 0.06); break; }
+        case 'stun': this.fx.burst(e.x, e.y + 0.5, e.z, 20, this.fx.spark, 5, 0.06, 3, 0.4); audio.zap(); break;
+        case 'throw': case 'place': audio.throwIt(); break;
+        case 'bounce': audio.bounce(); break;
+        case 'spit': { const [pan, vol] = this.where(e.x, e.zz); audio.spit(pan, Math.max(0.2, vol)); break; }
+        case 'screamWindup': { const [pan, vol] = this.where(Z.x[e.z], Z.z[e.z]); audio.scream(pan, Math.max(0.3, vol)); break; }
+        case 'scream': this.hud.showNote('A screamer whipped them into a frenzy!', 2); break;
+        case 'charge': { const [pan, vol] = this.where(Z.x[e.z], Z.z[e.z]); audio.roar(pan, Math.max(0.3, vol)); break; }
+        case 'fuse': this.hud.showNote('Exploder! Get back!', 1.2); break;
+        case 'slamWindup': { const [pan, vol] = this.where(Z.x[e.z], Z.z[e.z]); audio.roar(pan, Math.max(0.5, vol)); break; }
+        case 'slam':
+          audio.slam();
+          this.fx.burst(e.x, 0.2, e.zz, 24, this.fx.dust, 7, 0.14, 2.5, 0.8);
+          this.shake = Math.max(this.shake, Math.max(0, 1 - Math.hypot(e.x - P.x, e.zz - P.z) / 12));
+          break;
+        case 'boss':
+          this.hud.showBanner('The Warden', 'It came for you', 4);
+          audio.roar(0, 1);
+          break;
+        case 'bossDown': this.hud.showBanner('The Warden falls', '+1000 points', 4); audio.victory(); break;
+        case 'points': if (e.p === P.seat) this.hud.popPoints(e.n); break;
+        case 'buy':
+          audio.buy(); this.hud.popPoints(e.n);
+          if (e.equip) this.hud.showNote(`${EQUIP[e.equip].name} — ${EQUIP[e.equip].slot === 'lethal' ? 'RB' : 'LB'} to use`, 2.5);
+          this.sendScore();
+          break;
+        case 'perk':
+          audio.perk(e.perk); this.hud.popPoints(e.n);
+          this.hud.showNote(`${PERKS[e.perk].name}: ${PERKS[e.perk].desc}`, 3);
+          break;
         case 'door':
           audio.door(); this.hud.popPoints(e.n);
           for (const s of this.doorSigns) if (s.id === e.id) s.m.visible = false;
           break;
-        case 'denied': audio.denied(); this.hud.showNote('Not enough points', 1.5); break;
-        case 'weapon': case 'swap': if (e.p === P.seat) { this.vmFor(e.w); audio.swap(); } break;
+        case 'denied': if (!e.quiet) { audio.denied(); this.hud.showNote('Not enough points', 1.5); } break;
+        case 'crateRoll': audio.crate(); break;
+        case 'crateOffer': this.hud.showNote(`The crate offers: ${e.tier ? RARITY[e.tier].name + ' ' : ''}${WEAPONS[e.w].name}`, 3); break;
+        case 'crateGone': this.hud.showNote('The crate took its gift back', 2); break;
+        case 'crateTaken': audio.buy(); break;
+        case 'openForge':
+          if (e.p === P.seat && !this.opts.autopilot) {
+            this.menus.push(forgeScreen(this.app, this.menus, g, P, () => { this.vmFor(); audio.buy(); }));
+          }
+          break;
+        case 'forged': audio.perk('doubletap'); this.hud.popPoints(e.n); this.hud.showBanner(`${RARITY[e.tier].name}`, 'Forged', 2); break;
+        case 'gunsmith': this.hud.popPoints(e.n); break;
+        case 'trapOn': audio.zap(); this.hud.popPoints(e.n); break;
+        case 'drop': this.hud.showNote(`${POWER_NAMES[e.kind]} dropped!`, 1.5); break;
+        case 'power':
+          audio.power();
+          this.hud.showBanner(POWER_NAMES[e.kind], e.kind === 'nuke' ? 'Kaboom' : '', 2);
+          if (e.kind === 'nuke') this.shake = 1;
+          break;
+        case 'powerEnd': audio.powerEnd(); break;
+        case 'secondwind': this.hud.showBanner('Second Wind', 'Back on your feet', 2.5); break;
+        case 'weapon': case 'swap': if (e.p === P.seat) { this.vmFor(); audio.swap(); } break;
         case 'reload': if (e.p === P.seat) audio.reload(); break;
         case 'reloaded': if (e.p === P.seat) audio.reloaded(); break;
         case 'shell': if (e.p === P.seat) audio.shell(); break;
@@ -231,13 +325,19 @@ export class PlayState {
         case 'land': audio.land(); break;
         case 'roundStart':
           audio.roundStart();
-          this.hud.showBanner(`Round ${e.round}`, e.round === 1 ? 'They’re coming' : 'Here they come');
+          this.hud.showBanner(`Round ${e.round}`, e.boss ? 'Something big is coming' : e.round === 1 ? 'They’re coming' : 'Here they come');
           this.sendScore();
           break;
         case 'roundEnd':
           audio.roundEnd();
           this.hud.showBanner(`Round ${e.round} survived`, 'Rebuild the windows', 3.5);
           this.sendScore();
+          break;
+        case 'victory':
+          audio.victory();
+          this.hud.showBanner('Dawn', `You survived ${e.round} rounds`, 6);
+          this.won = true; this.overT = 0;
+          this.saveStats(e.round + 1, true);
           break;
         case 'gameover':
           audio.gameOver();
@@ -252,11 +352,15 @@ export class PlayState {
 
   pose(dt, now, lookX, lookY) {
     const P = this.P, view = this.app.view;
-    // Death cam: sink to the floor and roll.
+    // Death cam: sink to the floor and roll (and back up on a Second Wind).
     if (P.down) { this.camDrop = Math.min(1.25, this.camDrop + dt * 1.6); this.camRoll = Math.min(0.5, this.camRoll + dt * 0.8); }
+    else if (this.camDrop > 0) { this.camDrop = Math.max(0, this.camDrop - dt * 2); this.camRoll = Math.max(0, this.camRoll - dt); }
     const bob = P.grounded ? -Math.abs(Math.cos(P.stepPhase)) * 0.035 * P.speedFrac * (1 - P.ads * 0.7) : 0;
-    view.setEye(P.x, P.y + P.eye + bob - this.camDrop, P.z, P.yaw, P.pitch + P.kick * 0.01, this.camRoll);
-    const W = WEAPONS[P.weapon.id];
+    this.shake = Math.max(0, this.shake - dt * 2.2);
+    const sh = this.shake * this.shake * 0.06;
+    view.setEye(P.x + (Math.random() - 0.5) * sh, P.y + P.eye + bob - this.camDrop + (Math.random() - 0.5) * sh, P.z,
+      P.yaw, P.pitch + P.kick * 0.01, this.camRoll);
+    const W = P.W;
     const fov = BASE_FOV / (1 + (W.zoom - 1) * P.ads) + (P.sprinting ? 4 : 0);
     if (Math.abs(view.camera.fov - fov) > 0.05) {
       view.camera.fov += (fov - view.camera.fov) * Math.min(1, dt * 14);
@@ -265,6 +369,7 @@ export class PlayState {
     view.camera.updateMatrixWorld();
     poseViewmodel(this.vm, P, dt, now / 1000, lookX, lookY);
     this.fx.update(dt);
+    this.props.update(this.game, now / 1000);
     for (const s of this.doorSigns) if (this.app.world.doors[s.id].open) s.m.visible = false;
   }
 
@@ -275,7 +380,7 @@ export class PlayState {
       { label: 'Resume', act: () => this.menus.clear() },
       { label: 'Settings', act: () => this.menus.push(settingsScreen(a, this.menus)) },
       { label: 'Controls', act: () => this.menus.push(controlsScreen(a, this.menus)) },
-      { label: 'Restart', sub: 'Back to round 1', act: () => a.setState(new PlayState(a, {})) },
+      { label: 'Restart', sub: 'Back to round 1', act: async () => { await this.saveStats(this.game.mode.round); a.setState(new PlayState(a, { standard: this.opts.standard, career: this.career })); } },
       { label: 'Quit to Party Station', act: () => { this.saveStats(this.game.mode.round); a.quit(); } },
     ];
     const menu = new Menu(items, { onBack: () => this.menus.clear() });
@@ -291,37 +396,42 @@ export class PlayState {
     });
   }
 
-  gameOver() {
+  endScreen(won) {
     const a = this.app, P = this.P, g = this.game;
-    const survived = Math.max(0, g.mode.round - 1);
+    const survived = won ? g.mode.round : Math.max(0, g.mode.round - 1);
     const menu = new Menu([
-      { label: 'Play again', act: () => a.setState(new PlayState(a, {})) },
+      { label: 'Play again', act: () => a.setState(new PlayState(a, { standard: this.opts.standard, career: this.career })) },
       { label: 'Quit to Party Station', act: () => a.quit() },
     ], { onBack: () => a.quit() });
     this.menus.push({
       handle: (input, sfx) => menu.handle(input, sfx),
       el: () => [
         h('div', { style: 'position:absolute;left:7vw;top:6vh' },
-          h('div', { class: 'nn-title', style: 'font-size:clamp(36px,5vw,96px)' }, 'You died'),
+          h('div', { class: 'nn-title', style: 'font-size:clamp(36px,5vw,96px)' }, won ? 'Dawn breaks' : 'You died'),
           h('div', { style: 'font-size:1.3em;margin-top:.6em' }, `You survived ${survived} round${survived === 1 ? '' : 's'}`),
-          h('div', { style: 'opacity:.8;margin-top:.3em' }, `${P.kills} kills · ${P.heads} headshots · ${P.points.toLocaleString()} points`),
-          this.best ? h('div', { style: 'opacity:.8;margin-top:.3em;color:#ffe08a' },
-            survived >= this.best.bestRound ? '★ New best!' : `Best: ${this.best.bestRound} rounds`) : null),
+          h('div', { style: 'opacity:.8;margin-top:.3em' }, `${P.kills} kills · ${P.heads} headshots · ${P.points.toLocaleString()} points · +${P.xp.toLocaleString()} XP`),
+          this.best != null ? h('div', { style: 'opacity:.8;margin-top:.3em;color:#ffe08a' },
+            survived > this.best ? '★ New best!' : `Best: ${this.best} rounds`) : null),
         menu.el(),
         hints(a.input, [[0, 'Select']]),
       ],
     });
   }
 
-  async saveStats(round) {
+  // Career: XP, best round, totals — one profile, updated once per match.
+  async saveStats(round, won = false) {
     if (this.opts.autopilot || this._saved) return;
     this._saved = true;
     const survived = Math.max(0, round - 1);
-    const st = (await loadProfile('stats')) || { bestRound: 0, games: 0, kills: 0 };
-    this.best = { ...st };
-    st.bestRound = Math.max(st.bestRound, survived);
-    st.games++; st.kills += this.P.kills;
-    saveProfile('stats', st);
+    const c = (await loadProfile('career')) || { xp: 0, bestRound: 0, games: 0, kills: 0, wins: 0 };
+    this.best = c.bestRound || 0;
+    c.xp = (c.xp || 0) + this.P.xp;
+    c.bestRound = Math.max(c.bestRound || 0, survived);
+    c.games = (c.games || 0) + 1;
+    c.kills = (c.kills || 0) + this.P.kills;
+    if (won) c.wins = (c.wins || 0) + 1;
+    this.career = c;
+    await saveProfile('career', c);
   }
 
   finishBench() {
@@ -335,7 +445,7 @@ export class PlayState {
     audio.ambience(false);
     for (const m of this.signs) { a.view.scene.remove(m); m.geometry.dispose(); m.material.map?.dispose(); m.material.dispose(); }
     for (const { m } of this.doorSigns) { a.view.scene.remove(m); m.geometry.dispose(); m.material.map?.dispose(); m.material.dispose(); }
-    for (const o of [this.fx.parts, this.fx.tracers]) { a.view.scene.remove(o); o.geometry.dispose(); o.material.dispose(); }
+    for (const o of [this.fx.parts, this.fx.tracers, this.props.mesh]) { a.view.scene.remove(o); o.geometry.dispose(); o.material.dispose(); }
     a.view.setViewmodel(null);
     this._vmGroup?.traverse(o => { o.geometry?.dispose(); o.material?.dispose(); });
     this.hudLayer.remove();

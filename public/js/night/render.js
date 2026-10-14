@@ -7,6 +7,7 @@
 import * as THREE from '/vendor/three/three.module.js';
 import { C, CEIL, WIN_LO, WIN_HI, MAX_BOARDS } from './sim/world.js';
 import { ZTYPES, S } from './sim/zombies.js';
+import { PERKS } from './sim/weapons.js';
 
 export { THREE };
 
@@ -76,6 +77,7 @@ const PAL = {
   car: lin(0x6b4a3a), carTop: lin(0x7d6a5a), carDark: lin(0x18181c),
   fence: lin(0x6b5135), trunk: lin(0x3b2a1e), leaf: lin(0x1f3a26), edge: lin(0x101a14),
   sill: lin(0x8a7a62), door: lin(0x5a3c26),
+  concrete: lin(0x77746c), stain: lin(0x55524b), iron: lin(0x34363c), ember: lin(0xff8a2a), gold: lin(0xe0b040),
 };
 
 function shade(col, light, k = 1, jitter = 0) {
@@ -92,8 +94,10 @@ export function buildWorld(world, mapDef) {
   };
   const L = [0, 0, 0], L2 = [0, 0, 0], L3 = [0, 0, 0], L4 = [0, 0, 0];
   const solidish = c => c === C.WALL || c === C.VOID || c === C.WINDOW;
-  const isInside = c => c === C.FLOOR || c === C.PROP || c === C.DOOR;
-  const building = c => c === C.FLOOR || c === C.PROP || c === C.DOOR || c === C.WALL || c === C.WINDOW;
+  const isInside = c => c === C.FLOOR || c === C.PROP || c === C.DOOR || c === C.MACHINE;
+  const building = c => isInside(c) || c === C.WALL || c === C.WINDOW;
+  const mach = new Map((mapDef.machines || []).map(m => [m.x + ',' + m.y, m]));
+  const inRect = (r, x, z) => r && x >= r[0] && x <= r[2] && z >= r[1] && z <= r[3];
   const lot = mapDef.lot;
   const inLot = (x, z) => lot && x >= lot[0] && x <= lot[2] && z >= lot[1] && z <= lot[3];
 
@@ -101,7 +105,8 @@ export function buildWorld(world, mapDef) {
   const cornerAO = (vx, vz) => {
     let n = 0;
     for (const [dx, dz] of [[-1, -1], [0, -1], [-1, 0], [0, 0]]) {
-      if (solidish(world.cell(vx + dx, vz + dz)) || world.cell(vx + dx, vz + dz) === C.PROP) n++;
+      const cc = world.cell(vx + dx, vz + dz);
+      if (solidish(cc) || cc === C.PROP || cc === C.MACHINE) n++;
     }
     return 1 - n * 0.16;
   };
@@ -134,9 +139,9 @@ export function buildWorld(world, mapDef) {
       const b = B(x, z);
       const inside = isInside(c);
       // Ground / floor.
-      if (c === C.FLOOR || c === C.PROP || c === C.DOOR) {
-        const kitchen = mapDef.kitchen && x >= mapDef.kitchen[0] && x <= mapDef.kitchen[2] && z >= mapDef.kitchen[1] && z <= mapDef.kitchen[3];
-        const tile = kitchen ? PAL.kitchen : ((x + z) & 1 ? PAL.tileA : PAL.tileB);
+      if (inside) {
+        const tile = inRect(mapDef.garage, x, z) ? (hash(x, z, 4) > 0.8 ? PAL.stain : PAL.concrete)
+          : inRect(mapDef.kitchen, x, z) ? PAL.kitchen : ((x + z) & 1 ? PAL.tileA : PAL.tileB);
         flat(b, x, z, 0, tile, true, false, 1, 0, 1, 0, 1, true);
         flat(b, x, z, CEIL, PAL.ceiling, true, true, 0.9);
       } else if (c !== C.WALL && c !== C.WINDOW) {
@@ -152,7 +157,7 @@ export function buildWorld(world, mapDef) {
         const [dx, dz] = SIDES[s];
         const nc = world.cell(x + dx, z + dz);
         const nIn = isInside(nc);
-        const nOpen = nc === C.FLOOR || nc === C.GROUND || nc === C.DOOR || nc === C.PROP || nc === C.WINDOW || nc === C.CAR || nc === C.FENCE || nc === C.TREE;
+        const nOpen = nc === C.FLOOR || nc === C.GROUND || nc === C.DOOR || nc === C.PROP || nc === C.WINDOW || nc === C.CAR || nc === C.FENCE || nc === C.TREE || nc === C.MACHINE;
         if (c === C.WALL && nOpen && nc !== C.WINDOW) {
           if (nIn) {
             face(b, x, z, s, 0, 1.0, PAL.wainscot, true);
@@ -169,7 +174,9 @@ export function buildWorld(world, mapDef) {
           const col = nIn ? PAL.wallIn : PAL.wallOut;
           face(b, x, z, s, 0, WIN_LO, nIn ? PAL.wainscot : PAL.base, nIn);
           face(b, x, z, s, WIN_HI, CEIL + (nIn ? 0 : 0.25), col, nIn);
-        } else if (c === C.PROP && !nIn === false && nc !== C.PROP) {
+        } else if (c === C.MACHINE && nc !== C.MACHINE && (nOpen || nIn)) {
+          machineFace(b, x, z, s, mach.get(x + ',' + z), face);
+        } else if (c === C.PROP && nIn && nc !== C.PROP) {
           face(b, x, z, s, 0, 0.92, PAL.counter, true);
           face(b, x, z, s, 0.92, 1.0, PAL.counterTop, true);
         } else if (c === C.CAR && nc !== C.CAR && nOpen) {
@@ -188,6 +195,11 @@ export function buildWorld(world, mapDef) {
         flat(b, x, z, WIN_HI, PAL.sill, false, true, 0.7);
       }
       if (c === C.PROP) flat(b, x, z, 1.0, PAL.counterTop, true, false, 1.05);
+      if (c === C.MACHINE) {
+        const m = mach.get(x + ',' + z);
+        const [h2, top] = m?.kind === 'crate' ? [0.95, PAL.wood] : m?.kind === 'forge' ? [1.3, PAL.ember] : [2.1, PAL.iron];
+        flat(b, x, z, h2, top, true, false, m?.kind === 'forge' ? 2.2 : 1);
+      }
       if (c === C.CAR) {
         flat(b, x, z, 0.95, PAL.carTop, false);
         // Cabin on the car's first cell only, inset — reads as a wreck.
@@ -216,6 +228,32 @@ export function buildWorld(world, mapDef) {
     if (g) meshes.push(g);
   }
   return meshes;
+}
+
+// Perk machines, the mystery crate and the Forge: a body plus a band of
+// colour that ignores the baked light, so it reads as lit from inside.
+const GLOW = [1.35, 1.35, 1.35];
+function machineFace(b, x, z, s, m, face) {
+  if (m?.kind === 'crate') {
+    face(b, x, z, s, 0, 0.8, PAL.wood, true);
+    face(b, x, z, s, 0.8, 0.95, PAL.gold, true, 1.3);
+    return;
+  }
+  if (m?.kind === 'forge') {
+    face(b, x, z, s, 0, 1.1, PAL.iron, true);
+    face(b, x, z, s, 1.1, 1.3, PAL.ember, true, 2.2);
+    return;
+  }
+  const col = lin(PERKS[m?.perk]?.color || '#888888');
+  face(b, x, z, s, 0, 1.2, col.clone().multiplyScalar(0.45), true);
+  // The lit sign: drawn with flat light so it glows in the dark diner.
+  const p = s === 0 ? [[x + 1, 1.25, z + 1], [x + 1, 1.25, z], [x + 1, 1.9, z], [x + 1, 1.9, z + 1]]
+    : s === 1 ? [[x, 1.25, z], [x, 1.25, z + 1], [x, 1.9, z + 1], [x, 1.9, z]]
+      : s === 2 ? [[x, 1.25, z + 1], [x + 1, 1.25, z + 1], [x + 1, 1.9, z + 1], [x, 1.9, z + 1]]
+        : [[x + 1, 1.25, z], [x, 1.25, z], [x, 1.9, z], [x + 1, 1.9, z]];
+  const lit = shade(col, GLOW);
+  b.quad(p[0], p[1], p[2], p[3], lit, lit, lit, lit);
+  face(b, x, z, s, 1.9, 2.1, col.clone().multiplyScalar(0.35), true);
 }
 
 // Low-poly pine: a trunk and two six-sided cones, colours baked.
@@ -284,66 +322,104 @@ class Horde {
     this.head = mk(partGeo(0.3, 0.32, 0.3, false), n);
     this.arm = mk(partGeo(0.12, 0.64, 0.12, true), n * 2);
     this.leg = mk(partGeo(0.16, 0.8, 0.17, true), n * 2);
+    // Unit box for everything type-specific: helmets, vests, sacs, horns.
+    this.extra = mk(partGeo(1, 1, 1, false), n * 3);
     this.m = new THREE.Matrix4(); this.root = new THREE.Matrix4(); this.loc = new THREE.Matrix4();
     this.q = new THREE.Quaternion(); this.e = new THREE.Euler(); this.v = new THREE.Vector3(); this.sc = new THREE.Vector3();
     this.col = new THREE.Color();
     this.skins = [0x7d9a6c, 0x8fa27a, 0x6e8466, 0x9aa07c, 0x7a8a72].map(lin);
     this.cloth = [0x4a4a5c, 0x6b3a3a, 0x3a4f6b, 0x5c5236, 0x3f5c45, 0x705a4a].map(lin);
     this.pants = [0x2b2d38, 0x3a3226, 0x2e3b4a].map(lin);
+    // Per-type skin / shirt overrides (null = the random palette).
+    this.look = {
+      runner: [null, 0x7a2222], crawler: [0x6a7a5c, 0x3a3a3a], armored: [null, 0x3c4238],
+      brute: [0x5f6f52, 0x5a4636], spitter: [0x8fbf5a, 0x4a5a2a], screamer: [0xc9c7b6, 0x6a6a72],
+      exploder: [0xb8b06a, 0x8a7a3a], warden: [0x6a2a24, 0x1e1a1a],
+    };
+    for (const k of Object.keys(this.look)) this.look[k] = this.look[k].map(c => (c == null ? null : lin(c)));
+    this.helmetC = lin(0x3f4636); this.plateC = lin(0x2f342c); this.sacC = lin(0x9be05a); this.hornC = lin(0xd8cfb8);
+    this.fuseC = lin(0xffe04a);
   }
 
-  _put(mesh, idx, x, y, z, rx, ry, rz, s = 1) {
+  _put(mesh, idx, x, y, z, rx, ry, rz, s = 1, sy = s, sz = s) {
     this.e.set(rx, ry, rz, 'YXZ');
     this.q.setFromEuler(this.e);
-    this.loc.compose(this.v.set(x, y, z), this.q, this.sc.set(s, s, s));
+    this.loc.compose(this.v.set(x, y, z), this.q, this.sc.set(s, sy, sz));
     this.m.multiplyMatrices(this.root, this.loc);
     mesh.setMatrixAt(idx, this.m);
   }
 
   update(now) {
     const P = this.pool;
-    let k = 0;
+    let k = 0, x = 0;
+    const ex = (px, py, pz, rx, ry, rz, w, h, d, col) => {
+      this._put(this.extra, x, px, py, pz, rx, ry, rz, w, h, d);
+      this.extra.setColorAt(x++, col);
+    };
     for (let i = 0; i < P.n; i++) {
       const st = P.state[i];
       if (st === S.FREE) continue;
       const T = ZTYPES[P.type[i]];
       const seed = P.seed[i];
       const walk = P.walk[i];
-      let lean = 0.18, fall = 0, sink = 0;
+      let fall = 0, sink = 0;
       if (st === S.DYING) {
         const t = P.t[i];
         fall = Math.min(1, t / 0.55);
         sink = Math.max(0, t - 0.9) * 1.2;
       }
-      this.e.set(-fall * 1.45, P.yaw[i], 0, 'YXZ');
+      this.e.set(-fall * (T.crawl ? 0.2 : 1.45), P.yaw[i], 0, 'YXZ');
       this.q.setFromEuler(this.e);
       const s = T.size * (0.94 + (seed % 13) / 100);
       this.root.compose(this.v.set(P.x[i], P.y[i] - sink, P.z[i]), this.q, this.sc.set(s, s, s));
-      const moving = st === S.CHASE ? 1 : 0.2;
+      const moving = st === S.CHASE || st === S.CHARGE ? 1 : 0.2;
       const swing = Math.sin(walk) * 0.55 * moving;
       const bob = Math.abs(Math.cos(walk)) * 0.05 * moving;
       const fl = P.flinch[i];
       const sway = Math.sin(now * 1.7 + seed) * 0.08;
-      // Legs from the hips.
-      this._put(this.leg, k * 2, -0.11, 0.8 + bob, 0, swing, 0, 0);
-      this._put(this.leg, k * 2 + 1, 0.11, 0.8 + bob, 0, -swing, 0, 0);
-      // Torso leans forward, jolts back when shot.
-      this._put(this.torso, k, 0, 0.8 + bob, 0, lean - fl * 0.35, 0, sway * 0.6);
-      // Arms out front, the classic shamble; a swipe whips them down.
-      let armX = -1.3 + Math.sin(walk * 0.5 + seed) * 0.12;
-      if (st === S.ATTACK) armX = -2.1 + Math.min(1, P.t[i] / 0.42) * 1.9;
-      if (st === S.BREACH) armX = -1.5 + Math.sin(P.t[i] * 9) * 0.5;
-      this._put(this.arm, k * 2, -0.3, 1.38 + bob, 0.04, armX + swing * 0.3, 0, 0.1);
-      this._put(this.arm, k * 2 + 1, 0.3, 1.38 + bob, 0.04, armX - swing * 0.3, 0, -0.1);
+      const look = this.look[T.id] || [];
+      const hot = 1 + fl * 0.8 + (P.burnT[i] > 0 ? 0.6 + Math.sin(now * 30 + i) * 0.3 : 0);
       const headGone = st === S.DYING && P.headKill[i];
-      this._put(this.head, k, 0, 1.42 + bob, 0.02, 0.15 + sway, sway * 2, sway, headGone ? 0.001 : 1);
+      if (T.crawl) {
+        // Belly on the floor, dragging itself on its arms.
+        this._put(this.torso, k, 0, 0.22, 0.05, 1.45, 0, sway * 0.5);
+        this._put(this.head, k, 0, 0.32, -0.55, 0.3 + sway, sway * 2, 0, headGone ? 0.001 : 1);
+        this._put(this.leg, k * 2, -0.11, 0.2, 0.6, 1.6 + swing * 0.2, 0, 0.1);
+        this._put(this.leg, k * 2 + 1, 0.11, 0.2, 0.6, 1.6 - swing * 0.2, 0, -0.1);
+        this._put(this.arm, k * 2, -0.25, 0.3, -0.45, -1.4 + Math.sin(walk) * 0.6, 0, 0.2);
+        this._put(this.arm, k * 2 + 1, 0.25, 0.3, -0.45, -1.4 - Math.sin(walk) * 0.6, 0, -0.2);
+      } else {
+        const lean = T.id === 'brute' || T.id === 'warden' ? 0.3 : 0.18;
+        this._put(this.leg, k * 2, -0.11, 0.8 + bob, 0, swing, 0, 0);
+        this._put(this.leg, k * 2 + 1, 0.11, 0.8 + bob, 0, -swing, 0, 0);
+        const bloat = T.id === 'exploder' ? 1.35 : 1;
+        this._put(this.torso, k, 0, 0.8 + bob, 0, lean - fl * 0.35, 0, sway * 0.6, bloat, 1, bloat);
+        let armX = -1.3 + Math.sin(walk * 0.5 + seed) * 0.12;
+        if (st === S.ATTACK) armX = -2.1 + Math.min(1, P.t[i] / 0.42) * 1.9;
+        if (st === S.BREACH) armX = -1.5 + Math.sin(P.t[i] * 9) * 0.5;
+        if (st === S.SLAM) armX = -3.0 + Math.min(1, P.t[i] / 0.9) * 2.6;
+        if (st === S.SCREAM) armX = -2.6;
+        if (st === S.SPIT) armX = -0.4;
+        if (T.id === 'screamer' && st === S.CHASE) armX = -0.3;
+        this._put(this.arm, k * 2, -0.3 * bloat, 1.38 + bob, 0.04, armX + swing * 0.3, 0, 0.1);
+        this._put(this.arm, k * 2 + 1, 0.3 * bloat, 1.38 + bob, 0.04, armX - swing * 0.3, 0, -0.1);
+        const headTilt = st === S.SCREAM || st === S.SPIT ? -0.5 : 0.15 + sway;
+        this._put(this.head, k, 0, 1.42 + bob, 0.02, headTilt, sway * 2, sway, headGone ? 0.001 : 1);
+        // Type extras, in the same root space.
+        if (P.helmet[i] > 0) ex(0, 1.72 + bob, 0.02, 0.15, 0, 0, 0.34, 0.12, 0.34, this.helmetC);
+        if (P.vest[i] > 0) ex(0, 0.95 + bob, 0.0, lean, 0, 0, 0.52, 0.42, 0.33, this.plateC);
+        if (T.id === 'spitter') ex(0, 1.15 + bob, 0.2, lean, 0, 0, 0.3, 0.32, 0.18, this.sacC);
+        if (T.id === 'warden') {
+          ex(-0.12, 1.78 + bob, 0, 0, 0, 0.5, 0.06, 0.18, 0.06, this.hornC);
+          ex(0.12, 1.78 + bob, 0, 0, 0, -0.5, 0.06, 0.18, 0.06, this.hornC);
+        }
+        if (st === S.FUSE) ex(0, 1.0, 0, 0, now * 6, 0, 0.62 + Math.sin(now * 40) * 0.06, 0.6, 0.45, this.fuseC);
+      }
       // Colours: per-zombie skin / shirt / trousers, flashing on hits.
-      const hot = 1 + fl * 0.8;
-      this.col.copy(this.skins[seed % 5]).multiplyScalar(hot);
+      this.col.copy(look[0] || this.skins[seed % 5]).multiplyScalar(hot);
       this.head.setColorAt(k, this.col);
       this.arm.setColorAt(k * 2, this.col); this.arm.setColorAt(k * 2 + 1, this.col);
-      this.col.copy(this.cloth[(seed >>> 3) % 6]).multiplyScalar(hot);
-      if (P.type[i] === 1) this.col.lerp(lin(0x7a2222), 0.4); // runners: blood-soaked
+      this.col.copy(look[1] || this.cloth[(seed >>> 3) % 6]).multiplyScalar(hot);
       this.torso.setColorAt(k, this.col);
       this.col.copy(this.pants[(seed >>> 6) % 3]);
       this.leg.setColorAt(k * 2, this.col); this.leg.setColorAt(k * 2 + 1, this.col);
@@ -351,8 +427,9 @@ class Horde {
     }
     for (const m of [this.torso, this.head]) { m.count = k; }
     for (const m of [this.arm, this.leg]) { m.count = k * 2; }
-    for (const m of [this.torso, this.head, this.arm, this.leg]) {
-      if (!k) continue;
+    this.extra.count = x;
+    for (const m of [this.torso, this.head, this.arm, this.leg, this.extra]) {
+      if (!m.count) continue;
       m.instanceMatrix.needsUpdate = true;
       if (m.instanceColor) m.instanceColor.needsUpdate = true;
     }

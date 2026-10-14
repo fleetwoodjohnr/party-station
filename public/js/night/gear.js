@@ -2,7 +2,7 @@
 // from boxes per weapon model (no meshes to download); effects are pooled
 // instanced particles and tracers, so a firefight allocates nothing.
 import { THREE } from './render.js';
-import { WEAPONS, KNIFE } from './sim/weapons.js';
+import { WEAPONS, MELEE, RARITY } from './sim/weapons.js';
 
 const lin = hex => new THREE.Color(hex);
 
@@ -45,7 +45,63 @@ function merge(geos) {
 const METAL = 0x2b2e36, STEEL = 0x4c505c, WOOD = 0x6b4426, GRIP = 0x1c1d22, SKIN = 0xc79a7a, SLEEVE = 0x3a4436, GLOVE = 0x26282c;
 
 // Gun parts in metres, muzzle toward -z; returns { geo, muzzle: z of tip, sightY }.
+// Shared shapes: a receiver, barrel, magazine, grip and stock, sized per
+// gun. `optic` is where a sight sits (y of the rail, z along the gun).
+const rifle = ({ len = 0.34, bar = 0.18, barW = 0.022, mag = [0.03, 0.13, 0.05], magZ = -0.1, stock = 0.2, h = 0.07, wood = false }) => ({
+  parts: [
+    block(0.052, h, len, wood ? WOOD : METAL, 0, 0, -len / 2 + 0.08),
+    block(barW, barW, bar, STEEL, 0, 0.01, -len + 0.08 - bar / 2),
+    block(mag[0], mag[1], mag[2], GRIP, 0, -h / 2 - mag[1] / 2 + 0.01, magZ, -0.12),
+    block(0.03, 0.09, 0.04, GRIP, 0, -0.075, 0.03, 0.3),
+    block(0.034, 0.05, stock, wood ? WOOD : METAL, 0, -0.01, 0.08 + stock / 2),
+    block(0.012, 0.022, 0.012, METAL, 0, h / 2 + 0.011, -len + 0.12),
+    block(0.03, 0.016, 0.03, METAL, 0, h / 2 + 0.008, 0.02),
+  ],
+  muzzle: -len + 0.08 - bar, sightY: h / 2 + 0.02, rail: h / 2 + 0.005, hipX: 0.16, hipY: -0.17, z: -0.34, adsZ: -0.3,
+  magAt: [0, -h / 2 - mag[1] / 2 + 0.01, magZ], mag, fore: magZ - 0.1,
+});
+
 const MODELS = {
+  revolver: () => ({
+    parts: [
+      block(0.034, 0.034, 0.2, STEEL, 0, 0.02, -0.1),
+      block(0.05, 0.05, 0.06, METAL, 0, 0.01, -0.01),
+      block(0.03, 0.1, 0.045, WOOD, 0, -0.06, 0.04, 0.35),
+      block(0.008, 0.012, 0.01, METAL, 0, 0.043, -0.19),
+    ],
+    muzzle: -0.2, sightY: 0.05, hipX: 0.15, hipY: -0.15, z: -0.36, adsZ: -0.34,
+  }),
+  pdw: () => ({ ...rifle({ len: 0.26, bar: 0.08, mag: [0.028, 0.16, 0.04], magZ: 0.02, stock: 0.14 }), hipX: 0.15 }),
+  ar: () => rifle({ len: 0.4, bar: 0.22, mag: [0.032, 0.15, 0.055], magZ: -0.12, stock: 0.22 }),
+  br: () => ({ ...rifle({ len: 0.44, bar: 0.2, mag: [0.034, 0.12, 0.06], magZ: -0.14, stock: 0.24, h: 0.08 }) }),
+  autoshotgun: () => rifle({ len: 0.42, bar: 0.24, barW: 0.034, mag: [0.06, 0.12, 0.08], magZ: -0.12, stock: 0.22, h: 0.08 }),
+  sawnoff: () => ({
+    parts: [
+      block(0.07, 0.035, 0.32, STEEL, 0, 0.02, -0.14),
+      block(0.05, 0.05, 0.12, WOOD, 0, 0.0, 0.05),
+      block(0.035, 0.1, 0.05, WOOD, 0, -0.06, 0.12, 0.5),
+    ],
+    muzzle: -0.3, sightY: 0.045, hipX: 0.15, hipY: -0.16, z: -0.32, adsZ: -0.3,
+  }),
+  dmr: () => rifle({ len: 0.5, bar: 0.26, mag: [0.03, 0.09, 0.06], magZ: -0.16, stock: 0.26, wood: true }),
+  sniper: () => ({
+    ...rifle({ len: 0.55, bar: 0.36, mag: [0.03, 0.06, 0.06], magZ: -0.12, stock: 0.28, wood: true }),
+    scopeBuiltIn: true,
+  }),
+  lmg: () => ({
+    ...rifle({ len: 0.5, bar: 0.28, barW: 0.028, mag: [0.1, 0.1, 0.12], magZ: -0.08, stock: 0.24, h: 0.09 }),
+    hipX: 0.17, hipY: -0.19,
+  }),
+  launcher: () => ({
+    parts: [
+      block(0.085, 0.085, 0.42, 0x4a5236, 0, 0.0, -0.18),
+      block(0.06, 0.06, 0.12, METAL, 0, -0.01, 0.07),
+      block(0.03, 0.1, 0.045, GRIP, 0, -0.08, -0.02, 0.3),
+      block(0.034, 0.05, 0.2, METAL, 0, -0.01, 0.2),
+      block(0.03, 0.03, 0.03, 0xffa020, 0, 0.06, -0.32),
+    ],
+    muzzle: -0.39, sightY: 0.075, hipX: 0.16, hipY: -0.17, z: -0.34, adsZ: -0.32,
+  }),
   pistol: () => ({
     parts: [
       block(0.036, 0.04, 0.2, STEEL, 0, 0.02, -0.06),
@@ -93,10 +149,30 @@ function hands(model) {
   return g;
 }
 
-export function buildViewmodel(id) {
-  const W = WEAPONS[id];
+// Attachments on the model: optic on the rail (and the sight line moves up
+// to it so ADS still lines up), muzzle devices, bigger mags, foregrips,
+// and a rarity stripe on the receiver.
+function fit(def, w) {
+  const extra = [];
+  const att = w.att || {};
+  const top = def.rail ?? def.sightY - 0.015;
+  if (att.optic === 'reddot') { extra.push(block(0.03, 0.03, 0.05, METAL, 0, top + 0.015, -0.03)); def.sightY = top + 0.022; }
+  if (att.optic === 'holo') { extra.push(block(0.04, 0.035, 0.03, METAL, 0, top + 0.018, -0.05), block(0.006, 0.03, 0.006, METAL, 0.017, top + 0.04, -0.05), block(0.006, 0.03, 0.006, METAL, -0.017, top + 0.04, -0.05)); def.sightY = top + 0.032; }
+  if (att.optic === 'scope4' || def.scopeBuiltIn) { extra.push(block(0.036, 0.036, 0.24, 0x1d1f24, 0, top + 0.03, -0.05)); def.sightY = top + 0.03; def.scope = true; }
+  if (att.muzzle === 'suppressor') extra.push(block(0.034, 0.034, 0.16, 0x1d1f24, 0, (def.sightY - 0.03), def.muzzle - 0.08));
+  if (att.muzzle === 'compensator') extra.push(block(0.03, 0.03, 0.05, STEEL, 0, (def.sightY - 0.03), def.muzzle - 0.02));
+  if (att.muzzle === 'suppressor') def.muzzle -= 0.16;
+  if (att.mag === 'extmag' && def.magAt) extra.push(block(def.mag[0] * 1.05, def.mag[1] * 0.6, def.mag[2], GRIP, def.magAt[0], def.magAt[1] - def.mag[1] * 0.55, def.magAt[2]));
+  if ((att.grip === 'vgrip' || att.grip === 'agrip') && def.fore != null) extra.push(block(0.028, 0.08, 0.03, GRIP, 0, -0.07, def.fore, att.grip === 'agrip' ? -0.6 : 0));
+  if (w.tier) extra.push(block(0.054, 0.012, 0.12, new THREE.Color(RARITY[w.tier].color).getHex(), 0, 0.012, -0.04));
+  return extra;
+}
+
+export function buildViewmodel(w, meleeId = 'knife') {
+  const W = WEAPONS[w.id];
   const def = MODELS[W.model]();
-  const geo = merge([...def.parts, ...hands(W.model)]);
+  const extra = fit(def, w);
+  const geo = merge([...def.parts, ...extra, ...hands(W.model)]);
   const mat = new THREE.MeshBasicMaterial({ vertexColors: true, fog: false });
   const mesh = new THREE.Mesh(geo, mat);
   const root = new THREE.Group();
@@ -115,19 +191,22 @@ export function buildViewmodel(id) {
   flash.position.set(0, def.sightY - 0.03, def.muzzle - 0.04);
   flash.visible = false;
   root.add(flash);
-  // Knife, hidden until a melee.
+  // Knife (or machete), hidden until a melee.
+  const big = meleeId === 'machete';
   const knife = new THREE.Mesh(merge([
     block(0.02, 0.025, 0.11, GRIP, 0, 0, 0.05),
-    block(0.006, 0.03, 0.16, 0xd8dbe2, 0, 0.004, -0.08),
+    block(0.006, big ? 0.05 : 0.03, big ? 0.42 : 0.16, 0xd8dbe2, 0, 0.004, big ? -0.21 : -0.08),
     block(0.06, 0.065, 0.08, GLOVE, 0, -0.01, 0.1),
   ]), mat);
   knife.visible = false;
-  return { root, mesh, flash, knife, def, id };
+  return { root, mesh, flash, knife, def, id: w.id, key: vmKey(w, meleeId) };
 }
+
+export const vmKey = (w, meleeId) => `${w.id}|${w.tier}|${Object.values(w.att || {}).join(',')}|${meleeId}`;
 
 // Per-frame viewmodel pose from the player's state.
 export function poseViewmodel(vm, P, dt, now, lookX, lookY) {
-  const d = vm.def, W = WEAPONS[vm.id];
+  const d = vm.def, W = WEAPONS[vm.id], M = MELEE[P.meleeId] || MELEE.knife;
   const a = P.ads;
   const st = vm.st || (vm.st = { swayX: 0, swayY: 0, flashT: 0 });
   st.swayX += (lookX * 0.9 - st.swayX) * Math.min(1, dt * 10);
@@ -161,13 +240,15 @@ export function poseViewmodel(vm, P, dt, now, lookX, lookY) {
   // Knife slash: gun drops away, the blade sweeps right to left.
   vm.knife.visible = P.act === 'melee';
   if (P.act === 'melee') {
-    const p = Math.min(1, P.actT / KNIFE.time);
+    const p = Math.min(1, P.actT / M.time);
     y -= 0.3 * Math.sin(Math.PI * Math.min(1, p * 1.4));
-    const k = Math.min(1, P.actT / KNIFE.hitAt);
+    const k = Math.min(1, P.actT / M.hitAt);
     vm.knife.position.set(0.25 - 0.4 * k, -0.12 + 0.03 * Math.sin(Math.PI * k), -0.32);
     vm.knife.rotation.set(-0.2, 0.9 - 1.6 * k, -0.6 + 0.4 * k);
   }
   if (P.down) { y -= 0.4; }
+  // Looking through a scope: the gun gets out of the way of the overlay.
+  if (d.scope && a > 0.85) y -= 1;
   vm.mesh.position.set(0, 0, 0);
   vm.root.position.set(x, y, z);
   vm.root.rotation.set(rx, ry, rz);
@@ -211,6 +292,11 @@ export class Effects {
     this.blood = [lin(0x7a0d0d), lin(0x5c0808), lin(0x931616)];
     this.dust = [lin(0x8a8378), lin(0x6e685e)];
     this.wood = [lin(0x7a5a3a), lin(0x5c4128)];
+    this.spark = [lin(0xbfe8ff).multiplyScalar(1.6), lin(0x7ac8ff).multiplyScalar(1.6)];
+    this.metal = [lin(0x8a8f96), lin(0xc0c4c8)];
+    this.flame = [lin(0xffd060).multiplyScalar(1.8), lin(0xff7a1a).multiplyScalar(1.6), lin(0xff3a0a).multiplyScalar(1.3)];
+    this.smoke = [lin(0x3a3632), lin(0x2a2826)];
+    this.acid = [lin(0x9be05a).multiplyScalar(1.4), lin(0x6fb83a)];
   }
 
   burst(x, y, z, n, palette, speed = 2.5, size = 0.06, up = 1.5, life = 0.7) {
@@ -263,6 +349,53 @@ export class Effects {
   }
 }
 
+// --------------------------------------------------------- world props
+// Grenades in flight, fire and acid pools, claymores and power-up drops:
+// one instanced unit box, recoloured and rescaled per item.
+const PROP_COL = {
+  frag: 0x3a4a2a, molotov: 0x8a5a2a, noisemaker: 0xd23a3a, stun: 0x9a9aa0, shell: 0x2a2a2a, acid: 0x9be05a,
+  fire: 0xff7a1a, acidPool: 0x6fb83a, stunArea: 0xffffff, claymore: 0x4a5236,
+  maxammo: 0x3ecf8e, instakill: 0xff4040, doublepts: 0xffd040, carpenter: 0xc08040, nuke: 0xff9020,
+};
+export class WorldProps {
+  constructor(scene) {
+    const g = new THREE.BoxGeometry(1, 1, 1);
+    this.mesh = new THREE.InstancedMesh(g, new THREE.MeshBasicMaterial({ color: 0xffffff }), 96);
+    this.mesh.frustumCulled = false;
+    this.mesh.setColorAt(0, new THREE.Color());
+    this.mesh.count = 0;
+    scene.add(this.mesh);
+    this.m = new THREE.Matrix4(); this.q = new THREE.Quaternion(); this.e = new THREE.Euler();
+    this.v = new THREE.Vector3(); this.s = new THREE.Vector3(); this.c = new THREE.Color();
+    this.cols = Object.fromEntries(Object.entries(PROP_COL).map(([k, v]) => [k, lin(v)]));
+  }
+  update(game, now) {
+    let k = 0;
+    const put = (x, y, z, sx, sy, sz, ry, col, bright = 1) => {
+      if (k >= 96) return;
+      this.e.set(0, ry, 0); this.q.setFromEuler(this.e);
+      this.m.compose(this.v.set(x, y, z), this.q, this.s.set(sx, sy, sz));
+      this.mesh.setMatrixAt(k, this.m);
+      this.mesh.setColorAt(k++, this.c.copy(col).multiplyScalar(bright));
+    };
+    const E = game.equipment;
+    for (const p of E.projectiles) put(p.x, p.y, p.z, 0.12, 0.12, p.kind === 'molotov' ? 0.22 : 0.12, p.t * 9, this.cols[p.kind] || this.cols.frag, p.kind === 'acid' ? 1.6 : 1);
+    for (const a of E.areas) {
+      const flick = a.kind === 'fire' ? 1.6 + Math.sin(now * 23 + a.x) * 0.4 : 1.2;
+      const col = a.kind === 'fire' ? this.cols.fire : a.kind === 'acid' ? this.cols.acidPool : this.cols.stunArea;
+      put(a.x, 0.03, a.z, a.r * 1.6, 0.02, a.r * 1.6, a.t, col, flick);
+    }
+    for (const c of E.claymores) put(c.x, 0.12, c.z, 0.22, 0.16, 0.08, c.yaw, this.cols.claymore);
+    for (const d of game.mode.drops || []) {
+      const blink = d.t > 21 && Math.floor(now * 6) % 2 ? 0 : 1;
+      if (!blink) continue;
+      put(d.x, 0.9 + Math.sin(now * 3) * 0.12, d.z, 0.42, 0.42, 0.42, now * 2, this.cols[d.kind], 1.8);
+    }
+    this.mesh.count = k;
+    if (k) { this.mesh.instanceMatrix.needsUpdate = true; this.mesh.instanceColor.needsUpdate = true; }
+  }
+}
+
 // ------------------------------------------------------------ chalk signs
 // Wall-buy outlines and door prices, drawn once to small canvas textures.
 function chalkTexture(draw, w = 256, h = 128) {
@@ -283,6 +416,12 @@ const OUTLINES = {
   smg: [[30, 50], [175, 50], [175, 40], [215, 40], [215, 52], [235, 52], [235, 64], [150, 64], [140, 105], [120, 105], [124, 64], [95, 64], [88, 92], [72, 92], [76, 64], [30, 66]],
   shotgun: [[15, 52], [190, 46], [240, 46], [240, 56], [190, 58], [180, 66], [110, 68], [100, 92], [40, 84], [15, 70]],
   pistol: [[60, 40], [200, 40], [200, 60], [130, 60], [120, 100], [95, 100], [100, 60], [60, 60]],
+  ar: [[10, 52], [200, 50], [200, 42], [236, 42], [236, 56], [246, 56], [246, 66], [150, 66], [146, 108], [126, 108], [128, 66], [96, 68], [92, 96], [76, 96], [80, 68], [20, 70]],
+  machete: [[20, 70], [70, 60], [220, 40], [236, 46], [220, 62], [80, 82], [26, 86]],
+  claymore: [[70, 40], [186, 40], [196, 86], [60, 86]],
+  noisemaker: [[110, 30], [146, 30], [160, 100], [96, 100]],
+  molotov: [[116, 22], [140, 22], [140, 48], [160, 70], [160, 110], [96, 110], [96, 70], [116, 48]],
+  stun: [[96, 34], [160, 34], [168, 106], [88, 106]],
 };
 
 export function chalkSign(kind, text) {

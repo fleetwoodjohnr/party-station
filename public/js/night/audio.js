@@ -76,6 +76,14 @@ const GUNS = {
     burst({ dur: 0.08, vol: 0.4, type: 'highpass', freq: 3000, at: 0.42 }); // pump: chk
     burst({ dur: 0.08, vol: 0.4, type: 'highpass', freq: 2500, at: 0.55 });
   },
+  revolver: () => { burst({ dur: 0.3, vol: 1.1, freq: 2400, sweep: 300 }); tone(95, 0.16, { type: 'triangle', vol: 0.7, glide: 40 }); },
+  rifle: () => { burst({ dur: 0.14, vol: 0.85, freq: 3600, sweep: 500 }); tone(120, 0.07, { type: 'triangle', vol: 0.45, glide: 45 }); },
+  marksman: () => { burst({ dur: 0.26, vol: 1.0, freq: 3000, sweep: 350 }); tone(100, 0.12, { type: 'triangle', vol: 0.6, glide: 40 }); },
+  sniper: () => {
+    burst({ dur: 0.55, vol: 1.2, freq: 2600, sweep: 160 }); tone(70, 0.3, { type: 'sine', vol: 0.9, glide: 30 });
+    burst({ dur: 0.06, vol: 0.35, type: 'bandpass', freq: 1800, q: 3, at: 0.7 }); burst({ dur: 0.06, vol: 0.35, type: 'bandpass', freq: 2200, q: 3, at: 0.95 });
+  },
+  launcher: () => { burst({ dur: 0.18, vol: 0.6, freq: 900, sweep: 200 }); tone(160, 0.12, { type: 'sine', vol: 0.5, glide: 70 }); },
 };
 
 export const audio = {
@@ -143,6 +151,36 @@ export const audio = {
     else if (kind === 'select') { tone(392, 0.07, { type: 'square', vol: 0.06 }); tone(587, 0.1, { type: 'square', vol: 0.06, at: 0.06 }); }
     else if (kind === 'back') tone(330, 0.1, { type: 'square', vol: 0.05, glide: 200 });
   }),
+  boom: safe((pan, vol) => {
+    ac();
+    burst({ dur: 1.1, vol: 1.3 * vol, freq: 900, sweep: 60, pan });
+    tone(48, 0.7, { type: 'sine', vol: 1.0 * vol, glide: 28 });
+    burst({ dur: 0.5, vol: 0.4 * vol, type: 'highpass', freq: 2000, at: 0.05, pan });
+  }),
+  bounce: safe(() => { ac(); tone(700 + Math.random() * 300, 0.04, { type: 'square', vol: 0.05 }); }),
+  throwIt: safe(() => { ac(); burst({ dur: 0.18, vol: 0.2, type: 'bandpass', freq: 900, q: 1, sweep: 2000 }); }),
+  fire: safe((pan, vol) => { ac(); for (let i = 0; i < 4; i++) burst({ dur: 0.12, vol: 0.25 * vol, type: 'bandpass', freq: 1200 + Math.random() * 1500, q: 2, pan, at: i * 0.09 }); }),
+  splat: safe((pan, vol) => { ac(); burst({ dur: 0.3, vol: 0.5 * vol, type: 'lowpass', freq: 700, sweep: 200, pan }); }),
+  spit: safe((pan, vol) => { ac(); burst({ dur: 0.35, vol: 0.5 * vol, type: 'bandpass', freq: 600, q: 4, sweep: 1600, pan }); }),
+  scream: safe((pan, vol) => {
+    ac();
+    for (const f of [620, 930, 1240]) tone(f, 1.1, { type: 'sawtooth', vol: 0.05 * vol, glide: f * 1.4, pan, attack: 0.08 });
+  }),
+  roar: safe((pan, vol) => { ac(); tone(55, 1.6, { type: 'sawtooth', vol: 0.3 * vol, glide: 38, pan, attack: 0.15 }); burst({ dur: 1.4, vol: 0.6 * vol, freq: 500, sweep: 120, pan }); }),
+  slam: safe(() => { ac(); tone(40, 0.6, { type: 'sine', vol: 1.1, glide: 25 }); burst({ dur: 0.7, vol: 0.9, freq: 400, sweep: 60 }); }),
+  zap: safe(() => { ac(); burst({ dur: 0.12, vol: 0.35, type: 'highpass', freq: 3500 }); tone(110 + Math.random() * 40, 0.12, { type: 'square', vol: 0.12 }); }),
+  armor: safe(() => { ac(); tone(1900, 0.08, { type: 'triangle', vol: 0.12 }); burst({ dur: 0.08, vol: 0.3, type: 'highpass', freq: 4000 }); }),
+  perk: safe(id => {
+    ac();
+    const tunes = { ironhide: [196, 247, 294, 392], quickhands: [523, 659, 784, 1047], secondwind: [392, 523, 659, 523], doubletap: [330, 330, 494, 659], steadyaim: [440, 554, 659, 880], stamina: [349, 440, 523, 698] };
+    (tunes[id] || tunes.ironhide).forEach((f, i) => tone(f, 0.22, { type: 'square', vol: 0.06, at: i * 0.16 }));
+    burst({ dur: 0.4, vol: 0.25, type: 'highpass', freq: 3000, at: 0.7 }); // the can opening
+  }),
+  crate: safe(() => { ac(); [659, 784, 880, 1047, 880, 784, 659, 784, 988, 1175].forEach((f, i) => tone(f, 0.25, { type: 'triangle', vol: 0.06, at: i * 0.28 })); }),
+  power: safe(() => { ac(); [523, 784, 1047, 1568].forEach((f, i) => tone(f, 0.18, { type: 'square', vol: 0.07, at: i * 0.08 })); }),
+  powerEnd: safe(() => { ac(); [784, 523].forEach((f, i) => tone(f, 0.2, { type: 'square', vol: 0.05, at: i * 0.12 })); }),
+  rankUp: safe(() => { ac(); [392, 523, 659, 784, 1047].forEach((f, i) => tone(f, i === 4 ? 0.6 : 0.14, { type: 'triangle', vol: 0.1, at: i * 0.11 })); }),
+  victory: safe(() => { ac(); [262, 330, 392, 523, 659, 784].forEach((f, i) => tone(f, 1.2, { type: 'triangle', vol: 0.08, at: i * 0.25 })); }),
   // Night wind: looping filtered noise that slowly breathes.
   ambience: safe(on => {
     ac();
